@@ -1,0 +1,17 @@
+network:
+  listen_address: "/ip4/0.0.0.0/tcp/8000"
+  bootstrap_peers:
+    - "/ip4/127.0.0.1/tcp/8001/p2p/12D3KooWRUoWsUkov4BMRdzpHE9o1MJYKfoPDXTiDhqPM3Qsvtxx"
+    - "/ip4/127.0.0.1/tcp/8002/p2p/12D3KooWRUoWsUkov4BMRdzpHE9o1MJYKfoPDXTiDhqPM3Qsvtxx"
+libp2p:
+  private_key: "CAESQARJRQAdvXEqx9cbCFgf/gmbhgwM3FG7P4WIaMyzSS//0/HoGYJvzilWa7OIZOFvshjPe/048yauXVGUl0CA0CU="
+  supported_protocols:
+    - "/my-consensus-protocol/1.0.0"
+consensus:
+  algorithm: "raft"
+  raft_config:
+    heartbeat_interval: 1000 # milliseconds
+    election_timeout: 5000 # milliseconds
+  state_store_path: "./raft_data"
+logging:
+  level: "info"
