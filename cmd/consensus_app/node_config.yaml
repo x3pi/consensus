@@ -16,7 +16,7 @@ bootstrapPeers:
 masterNodeAddress: "/ip4/127.0.0.1/tcp/9000/p2p/12D3KooWM3MudyzXTZTUafyxXQQBNKeK9cpX9QekgB9bPsRwNGvS"
 # Loại của node này (ví dụ: "master", "sub", "validator", "light-client").
 # Logic ứng dụng của bạn có thể dựa vào giá trị này.
-nodeType: "validator"
+nodeType: "consensus"
 
 # Đường dẫn đến thư mục gốc nơi node có thể lưu trữ dữ liệu (ví dụ: database, logs).
 rootPath: "./node_data_validator_1"

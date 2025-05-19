@@ -5,31 +5,92 @@ import (
 	"errors"
 	"log"
 
+	"github.com/libp2p/go-libp2p/core/network" // Thêm import này
 	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/libp2p/go-libp2p/core/peerstore" // Thêm import này
 	"github.com/libp2p/go-libp2p/core/protocol"
 )
 
 // --- Logic Dành riêng cho Ứng dụng ---
 
 // SendRequestToMasterNode tìm một peer loại "master" và gửi một yêu cầu.
+// Nó sẽ sử dụng địa chỉ MasterNodeAddress từ cấu hình nếu có,
+// nếu không sẽ tìm một peer "master" đang kết nối.
+// Hàm này sẽ chờ nhận phản hồi và in ra phản hồi đó.
 func (mn *ManagedNode) SendRequestToMasterNode(ctx context.Context, protoID protocol.ID, message []byte) ([]byte, error) {
-	mn.peerMutex.RLock()
-	var masterPeerID peer.ID
-	// Tìm master peer đầu tiên đang kết nối
-	for pid, pInfo := range mn.peers {
-		if pInfo.Type == "master" && pInfo.Status == PeerConnected {
-			masterPeerID = pid
-			break
+	var targetPeerID peer.ID
+
+	// Ưu tiên sử dụng MasterNodeAddress từ cấu hình
+	if mn.config.MasterNodeAddress != "" {
+		masterAddrInfo, err := peer.AddrInfoFromString(mn.config.MasterNodeAddress)
+		if err != nil {
+			log.Printf("Lỗi: Không thể phân tích MasterNodeAddress từ cấu hình '%s': %v", mn.config.MasterNodeAddress, err)
+			// Không trả về lỗi ngay, thử tìm trong danh sách peer kết nối
+		} else {
+			targetPeerID = masterAddrInfo.ID
+			log.Printf("Sử dụng MasterNodeAddress từ cấu hình: %s", targetPeerID)
+
+			// Kiểm tra xem có đang kết nối tới master node đã cấu hình không
+			// và thử kết nối nếu chưa.
+			if mn.host.Network().Connectedness(targetPeerID) != network.Connected {
+				log.Printf("Cảnh báo: Không kết nối tới master node đã cấu hình (%s). Thử kết nối...", targetPeerID)
+				// Thêm địa chỉ vào peerstore để libp2p biết cách kết nối
+				// Sử dụng Addrs thay vì AddAddr vì AddrInfo có thể chứa nhiều địa chỉ
+				mn.host.Peerstore().AddAddrs(masterAddrInfo.ID, masterAddrInfo.Addrs, peerstore.PermanentAddrTTL)
+				if err := mn.host.Connect(ctx, *masterAddrInfo); err != nil {
+					log.Printf("Không thể kết nối tới master node đã cấu hình %s: %v", targetPeerID, err)
+					// Nếu không kết nối được, thử tìm trong các peer đang kết nối
+					targetPeerID = "" // Reset để tìm trong danh sách peer
+				} else {
+					log.Printf("Đã kết nối thành công tới master node đã cấu hình: %s", targetPeerID)
+				}
+			}
 		}
 	}
-	mn.peerMutex.RUnlock()
 
-	if masterPeerID == "" {
-		return nil, errors.New("không tìm thấy master peer nào đang kết nối")
+	// Nếu không có MasterNodeAddress trong cấu hình hoặc không kết nối được,
+	// tìm một master peer đang kết nối
+	if targetPeerID == "" {
+		log.Printf("MasterNodeAddress không được cấu hình hoặc không kết nối được. Đang tìm master peer trong danh sách kết nối...")
+		mn.peerMutex.RLock()
+		for pid, pInfo := range mn.peers {
+			// Ưu tiên peer có Type là "master" và đang kết nối
+			isExplicitMaster := pInfo.Type == "master"
+
+			if isExplicitMaster && pInfo.Status == PeerConnected {
+				targetPeerID = pid
+				log.Printf("Tìm thấy master peer đang kết nối: %s (Loại: %s)", targetPeerID, pInfo.Type)
+				break
+			}
+		}
+		mn.peerMutex.RUnlock()
 	}
 
-	log.Printf("Đang gửi yêu cầu tới master peer %s qua protocol %s", masterPeerID, protoID)
-	return mn.SendRequest(ctx, masterPeerID, protoID, message) // stream_manager.go
+	if targetPeerID == "" {
+		return nil, errors.New("không tìm thấy master peer nào (từ cấu hình hoặc đang kết nối) để gửi yêu cầu")
+	}
+
+	log.Printf("Đang gửi yêu cầu tới master peer %s qua protocol %s", targetPeerID, protoID)
+
+	// Gọi mn.SendRequest để gửi yêu cầu và chờ nhận phản hồi
+	responseData, err := mn.SendRequest(ctx, targetPeerID, protoID, message) // stream_manager.go
+
+	// Kiểm tra lỗi sau khi gọi SendRequest
+	if err != nil {
+		log.Printf("Lỗi khi gửi yêu cầu hoặc nhận phản hồi từ master node %s: %v", targetPeerID, err)
+		return nil, err // Trả về lỗi nếu có
+	}
+
+	// In phản hồi ra (nếu không có lỗi)
+	if responseData != nil {
+		// In ra dưới dạng chuỗi. Nếu dữ liệu không phải là chuỗi có thể in được,
+		// bạn có thể muốn in dưới dạng hex hoặc xử lý theo cách khác.
+		log.Printf("Đã nhận phản hồi từ master 1 node %s (%d bytes): %s", targetPeerID, len(responseData), string(responseData))
+	} else {
+		log.Printf("Đã nhận phản hồi nil từ master 2 node %s (không có lỗi)", targetPeerID)
+	}
+
+	return responseData, nil
 }
 
 // --- Quản lý Fee Addresses ---

@@ -54,6 +54,6 @@ func DefaultNodeConfig() NodeConfig {
 		RootPath:              "./node_data",
 		TransactionChanBuffer: 1000,
 		KeyValueCacheSize:     1000,
-		SupportedProtocols:    []protocol.ID{BlockRequestProtocol},
+		SupportedProtocols:    []protocol.ID{TransactionsRequestProtocol},
 	}
 }
