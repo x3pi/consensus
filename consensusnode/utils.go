@@ -6,13 +6,11 @@ import (
 	"log"
 
 	"github.com/libp2p/go-libp2p/core/crypto"
-	"github.com/libp2p/go-libp2p/core/protocol"
 )
 
 // BlockRequestProtocol định nghĩa ID protocol cho yêu cầu block.
 // Đảm bảo hằng số này nhất quán với định nghĩa ở các file khác nếu có.
 // const BlockRequestProtocol protocol.ID = "/meta-node/block-request/1.0.0" // Đã định nghĩa ở managed_node.go
-const BlockRequestProtocol protocol.ID = "/meta-node/block-request/1.0.0"
 
 // loadPrivateKey là một helper để tải hoặc tạo khóa riêng tư.
 // Sử dụng base64 decoding chuẩn.

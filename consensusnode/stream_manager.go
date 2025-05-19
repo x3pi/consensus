@@ -2,45 +2,112 @@ package consensusnode
 
 import (
 	"bufio"
-	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"log"
-	"strings"
 
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/protocol"
 )
 
-// BlockRequestProtocol định nghĩa ID protocol cho yêu cầu block.
-// Đảm bảo hằng số này nhất quán với định nghĩa ở các file khác nếu có.
-// const BlockRequestProtocol protocol.ID = "/meta-node/block-request/1.0.0" // Đã định nghĩa ở managed_node.go
+// --- Protocol IDs ---
+const BlockRequestProtocol protocol.ID = "/meta-node/block-request/1.0.0"
+const TransactionStreamProtocol protocol.ID = "/meta-node/transaction-stream/1.0.0"
 
-// --- Xử lý Stream ---
+// --- Stream Handlers ---
+// transactionStreamHandler xử lý các stream đến mang theo mảng giao dịch.
+// Hàm này chỉ chấp nhận stream từ Master Node đã được cấu hình.
+func (mn *ManagedNode) transactionStreamHandler(stream network.Stream) {
+	remotePeerID := stream.Conn().RemotePeer()
+	log.Printf("Đã nhận transaction stream từ peer: %s trên protocol %s", remotePeerID, stream.Protocol())
 
-// RegisterStreamHandler đăng ký một handler cho một protocol ID cụ thể.
+	// --- KIỂM TRA MASTER NODE ---
+	var configuredMasterPeerID peer.ID
+	if mn.config.MasterNodeAddress != "" {
+		masterAddrInfo, err := peer.AddrInfoFromString(mn.config.MasterNodeAddress)
+		if err != nil {
+			log.Printf("❌ Lỗi nghiêm trọng: Không thể phân tích MasterNodeAddress từ cấu hình '%s': %v. Từ chối stream từ %s.", mn.config.MasterNodeAddress, err, remotePeerID)
+			_ = stream.Reset() // Reset stream vì cấu hình master node có vấn đề
+			return
+		}
+		configuredMasterPeerID = masterAddrInfo.ID
+	} else {
+		log.Printf("⚠️ Cảnh báo: MasterNodeAddress chưa được cấu hình. Không thể xác thực nguồn gốc transaction stream. Từ chối stream từ %s.", remotePeerID)
+		_ = stream.Reset() // Reset stream vì không có master node nào được cấu hình để so sánh
+		return
+	}
+
+	if remotePeerID != configuredMasterPeerID {
+		log.Printf("🚫 CẢNH BÁO: Đã nhận transaction stream từ một peer KHÔNG PHẢI là Master Node đã cấu hình (%s). Peer gửi: %s. Stream sẽ bị từ chối.", configuredMasterPeerID, remotePeerID)
+		_ = stream.Reset() // Reset stream vì không phải từ Master Node
+		return
+	}
+	// --- KẾT THÚC KIỂM TRA MASTER NODE ---
+
+	log.Printf("✅ Transaction stream từ Master Node %s được chấp nhận. Tiếp tục xử lý...", remotePeerID)
+
+	defer func() {
+		if errClose := stream.Close(); errClose != nil {
+			log.Printf("Lỗi khi đóng transaction stream từ Master Node %s: %v", remotePeerID, errClose)
+		} else {
+			log.Printf("Đã đóng transaction stream từ Master Node %s", remotePeerID)
+		}
+	}()
+	log.Printf("TXS: 1 %v", mn.config.MaxMessageSize)
+
+	limitedReader := io.LimitReader(stream, int64(mn.config.MaxMessageSize))
+	rawData, err := io.ReadAll(limitedReader)
+	log.Printf("TXS: 1.0")
+
+	if err != nil {
+		log.Printf("❌ Lỗi đọc dữ liệu từ transaction stream (Master Node %s): %v", remotePeerID, err)
+		_ = stream.Reset()
+		log.Printf("TXS: 1.1")
+
+		return
+	}
+	log.Printf("TXS: 2")
+
+	if len(rawData) == 0 {
+		log.Printf("⚠️ Transaction stream từ Master Node %s không có dữ liệu.", remotePeerID)
+		return
+	}
+	// Chỉ in dữ liệu nhận được dưới dạng hex
+	log.Println(string(rawData))
+	log.Printf("TXS: 3")
+
+	// Dòng log chi tiết về số byte nhận được và "Đang giải mã..." đã được loại bỏ để đơn giản hóa.
+	// Nếu bạn vẫn muốn giữ thông tin về số byte, bạn có thể thêm lại một dòng log tối giản hơn ở đây.
+}
+
+// blockRequestHandler là một ví dụ về stream handler.
+func (mn *ManagedNode) blockRequestHandler(stream network.Stream) {
+	peerID := stream.Conn().RemotePeer()
+	log.Printf("Đã nhận block request từ peer: %s trên protocol %s (Cần triển khai logic chi tiết)", peerID, stream.Protocol())
+	defer stream.Close()
+	// ... (logic xử lý block request)
+}
+
+// --- Quản lý Stream Handler ---
 func (mn *ManagedNode) RegisterStreamHandler(protoID protocol.ID, handler network.StreamHandler) {
 	if handler == nil {
 		log.Printf("Cảnh báo: Đã cố gắng đăng ký stream handler nil cho protocol %s", protoID)
 		return
 	}
 	mn.streamHandlers[protoID] = handler
-	if mn.host != nil { // Nếu host đã được khởi tạo, thiết lập trực tiếp
+	if mn.host != nil {
 		mn.host.SetStreamHandler(protoID, handler)
-		log.Printf("Đã đăng ký stream handler cho protocol %s (từ RegisterStreamHandler)", protoID)
 	} else {
 		log.Printf("Host chưa được khởi tạo, stream handler cho %s sẽ được thiết lập khi Start()", protoID)
 	}
 }
 
-// SendRequest mở một stream mới tới một peer và gửi một message.
-// Đây là một cơ chế request/response chung.
+// --- Gửi Dữ liệu qua Stream ---
 func (mn *ManagedNode) SendRequest(ctx context.Context, targetPeerID peer.ID, protoID protocol.ID, message []byte) ([]byte, error) {
 	if targetPeerID == mn.host.ID() {
-		return nil, errors.New("không thể gửi request tới chính mình")
+		return nil, fmt.Errorf("không thể gửi request tới chính mình")
 	}
 	if mn.host.Network().Connectedness(targetPeerID) != network.Connected {
 		return nil, fmt.Errorf("không kết nối tới peer %s để gửi request qua protocol %s", targetPeerID, protoID)
@@ -53,14 +120,14 @@ func (mn *ManagedNode) SendRequest(ctx context.Context, targetPeerID peer.ID, pr
 	}
 	defer func() {
 		if errClose := stream.Close(); errClose != nil {
-			log.Printf("Lỗi khi đóng stream tới %s: %v", targetPeerID, errClose)
+			log.Printf("Lỗi khi đóng stream (SendRequest) tới %s: %v", targetPeerID, errClose)
 		}
 	}()
 
 	log.Printf("Đang gửi yêu cầu tới %s qua %s (%d bytes)", targetPeerID, protoID, len(message))
 	_, err = stream.Write(message)
 	if err != nil {
-		_ = stream.Reset() // Cố gắng reset stream nếu ghi lỗi
+		_ = stream.Reset()
 		return nil, fmt.Errorf("không thể ghi vào stream: %w", err)
 	}
 
@@ -71,72 +138,20 @@ func (mn *ManagedNode) SendRequest(ctx context.Context, targetPeerID peer.ID, pr
 	}
 
 	reader := bufio.NewReader(stream)
-	var responseBuffer bytes.Buffer
-	// Đọc từng phần với buffer để tránh cấp phát bộ nhớ lớn không cần thiết
-	readBuffer := make([]byte, 4096) // Kích thước buffer đọc
-	for {
-		n, errRead := reader.Read(readBuffer)
-		if n > 0 {
-			responseBuffer.Write(readBuffer[:n])
-		}
-		if errRead != nil {
-			if errRead == io.EOF {
-				break
-			}
-			// Không reset stream ở đây vì có thể đã nhận được một phần dữ liệu
-			return responseBuffer.Bytes(), fmt.Errorf("không thể đọc toàn bộ phản hồi từ stream: %w (đã đọc %d bytes)", errRead, responseBuffer.Len())
-		}
+	var responseBuffer []byte
+	responseBuffer, err = io.ReadAll(reader)
+	if err != nil && err != io.EOF {
+		return responseBuffer, fmt.Errorf("không thể đọc toàn bộ phản hồi từ stream: %w (đã đọc %d bytes)", err, len(responseBuffer))
 	}
 
-	log.Printf("Đã nhận phản hồi từ %s (%d bytes) cho protocol %s", targetPeerID, responseBuffer.Len(), protoID)
-	return responseBuffer.Bytes(), nil
+	log.Printf("Đã nhận phản hồi từ %s (%d bytes) cho protocol %s", targetPeerID, len(responseBuffer), protoID)
+	return responseBuffer, nil
 }
 
-// blockRequestHandler là một ví dụ về stream handler.
-// Cần được điều chỉnh cho logic xử lý block request cụ thể của bạn.
-func (mn *ManagedNode) blockRequestHandler(stream network.Stream) {
-	peerID := stream.Conn().RemotePeer()
-	log.Printf("Đã nhận block request từ peer: %s trên protocol %s", peerID, stream.Protocol())
-	defer func() {
-		if errClose := stream.Close(); errClose != nil {
-			log.Printf("Lỗi khi đóng stream (blockRequestHandler) từ %s: %v", peerID, errClose)
-		}
-	}()
-
-	// Ví dụ: Đọc yêu cầu tên file
-	reader := bufio.NewReader(stream)
-	fileName, err := reader.ReadString('\n')
-	if err != nil {
-		log.Printf("❌ Lỗi đọc dữ liệu từ stream (blockRequestHandler) từ %s: %v", peerID, err)
-		_ = stream.Reset() // Cố gắng reset stream
-		return
+// --- Helper Functions ---
+func min(a, b int) int {
+	if a < b {
+		return a
 	}
-	fileName = strings.TrimSpace(fileName)
-	log.Printf("📥 Yêu cầu nhận (blockRequestHandler) từ %s: %s", peerID, fileName)
-
-	// Xử lý yêu cầu:
-	// 1. Kiểm tra xem file/block có tồn tại không (dựa trên `fileName`).
-	// 2. Nếu có, đọc nội dung và gửi lại.
-	// 3. Nếu không, gửi thông báo lỗi.
-
-	// Ví dụ: Giả sử file "example_block.data" tồn tại và chứa "Đây là dữ liệu block mẫu."
-	if fileName == "example_block.data" {
-		blockData := []byte("Đây là dữ liệu block mẫu cho " + fileName + "\n")
-		_, err = stream.Write(blockData)
-		if err != nil {
-			log.Printf("❌ Lỗi gửi dữ liệu block (blockRequestHandler) tới %s: %v", peerID, err)
-			_ = stream.Reset()
-			return
-		}
-		log.Printf("✅ Đã gửi dữ liệu block '%s' tới %s", fileName, peerID)
-	} else {
-		errorMessage := []byte("Lỗi: File hoặc block '" + fileName + "' không tìm thấy.\n")
-		_, err = stream.Write(errorMessage)
-		if err != nil {
-			log.Printf("❌ Lỗi gửi thông báo lỗi (blockRequestHandler) tới %s: %v", peerID, err)
-			_ = stream.Reset()
-			return
-		}
-		log.Printf("ℹ️ Đã gửi thông báo lỗi 'không tìm thấy file' cho '%s' tới %s", fileName, peerID)
-	}
+	return b
 }

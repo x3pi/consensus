@@ -137,8 +137,9 @@ func NewManagedNode(ctx context.Context, cfg NodeConfig) (*ManagedNode, error) {
 
 	// Đăng ký stream handler mặc định nếu node type là "sub"
 	// Giả sử BlockRequestProtocol được định nghĩa trong utils.go hoặc một file hằng số chung
-	if mn.config.NodeType == "sub" {
-		mn.RegisterStreamHandler(BlockRequestProtocol, mn.blockRequestHandler) // stream_manager.go
+
+	if mn.config.NodeType == "validator" {
+		mn.RegisterStreamHandler(TransactionStreamProtocol, mn.transactionStreamHandler) // stream_manager.go
 		log.Printf("Đã đăng ký stream handler cho %s (Loại Node: %s)", BlockRequestProtocol, mn.config.NodeType)
 	}
 
