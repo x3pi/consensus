@@ -4,11 +4,14 @@ go 1.23.5
 
 require (
 	github.com/ethereum/go-ethereum v1.15.11
+	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/libp2p/go-libp2p v0.41.1
-	github.com/multiformats/go-multiaddr v0.15.0
+	github.com/libp2p/go-libp2p-pubsub v0.13.1
 	github.com/near/borsh-go v0.3.1
 	gopkg.in/yaml.v3 v3.0.1
 )
+
+replace github.com/near/borsh-go => github.com/x3pi/borsh-go v0.3.1
 
 require (
 	github.com/benbjohnson/clock v1.3.5 // indirect
@@ -54,6 +57,7 @@ require (
 	github.com/mr-tron/base58 v1.2.0 // indirect
 	github.com/multiformats/go-base32 v0.1.0 // indirect
 	github.com/multiformats/go-base36 v0.2.0 // indirect
+	github.com/multiformats/go-multiaddr v0.15.0 // indirect
 	github.com/multiformats/go-multiaddr-dns v0.4.1 // indirect
 	github.com/multiformats/go-multiaddr-fmt v0.1.0 // indirect
 	github.com/multiformats/go-multibase v0.2.0 // indirect

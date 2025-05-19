@@ -9,16 +9,6 @@ import (
 	"sync"
 )
 
-// Định nghĩa lại các struct và hàm từ event.go ở đây hoặc đảm bảo event.go được compile cùng.
-// Để đơn giản, tôi sẽ không lặp lại toàn bộ code event.go ở đây, chỉ giả định nó có sẵn.
-// Trong thực tế, bạn sẽ import package "dag" và sử dụng các struct/hàm từ file event.go
-
-// Giả định các struct EventID, EventData, Event, ClothoStatus,
-// các hằng số ClothoUndecided, ClothoIsClotho, ClothoIsNotClotho,
-// và các hàm NewEvent, Hash, GetEventId, Marshal, Unmarshal, ToEventID, HexToEventID,
-// SetVote, GetVote, SetClothoStatus, SetCandidate
-// đã được định nghĩa trong event.go và có thể truy cập được.
-
 // QUORUM là ngưỡng bỏ phiếu cần thiết để quyết định trạng thái Clotho.
 // Trong thực tế, QUORUM = 2/3 tổng Stake + 1.
 // Ở đây dùng giá trị cố định cho ví dụ.

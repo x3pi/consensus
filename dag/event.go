@@ -3,13 +3,12 @@
 package dag
 
 import (
-	"bytes" // Cần cho ví dụ sử dụng key
+	"bytes"
 	"fmt"
 	"sort"
 	"sync"
-	"sync/atomic" // Import package atomic
+	"sync/atomic"
 
-	// Cần cho ví dụ sử dụng timestamp
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	borsh "github.com/near/borsh-go"
@@ -58,7 +57,7 @@ const (
 // Các trường trong cấu trúc này sẽ được tuần tự hóa bằng Borsh để hashing.
 // Cấu trúc này thể hiện Event có một self-parent và nhiều other-parents.
 type EventData struct {
-	Transactions [][]byte  `borsh:"slice"`     // Danh sách các giao dịch hoặc dữ liệu khác (byte slice)
+	Transactions []byte    `borsh:"slice"`     // Danh sách các giao dịch hoặc dữ liệu khác (byte slice)
 	SelfParent   EventID   `borsh:"[32]uint8"` // Hash của parent cùng validator (size 32 bytes) - Tham chiếu bản thân
 	OtherParents []EventID `borsh:"slice"`     // Hash của các parent khác validator (slice các size 32 bytes) - k-1 Tham chiếu nút ngang hàng
 	Creator      []byte    `borsh:"slice"`     // Public key của người tạo event (byte slice)
@@ -121,14 +120,6 @@ func NewEvent(data EventData, signature []byte) *Event {
 // trước khi tính hash của EventData. Việc sắp xếp này là quan trọng để cùng một tập dữ liệu
 // luôn tạo ra cùng một hash, bất kể thứ tự ban đầu của các phần tử trong slice.
 func (e *Event) PrepareForHashing() error {
-	// 1. Sắp xếp các giao dịch
-	if len(e.EventData.Transactions) > 0 {
-		// Sắp xếp các giao dịch theo thứ tự byte của chúng (hoặc theo hash của giao dịch nếu có)
-		// Đây là ví dụ đơn giản sắp xếp theo byte của slice
-		sort.SliceStable(e.EventData.Transactions, func(i, j int) bool {
-			return bytes.Compare(e.EventData.Transactions[i], e.EventData.Transactions[j]) < 0
-		})
-	}
 
 	// 2. Sắp xếp các OtherParents
 	if len(e.EventData.OtherParents) > 0 {

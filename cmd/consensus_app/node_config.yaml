@@ -1,17 +1,47 @@
-network:
-  listen_address: "/ip4/0.0.0.0/tcp/8000"
-  bootstrap_peers:
-    - "/ip4/127.0.0.1/tcp/8001/p2p/12D3KooWRUoWsUkov4BMRdzpHE9o1MJYKfoPDXTiDhqPM3Qsvtxx"
-    - "/ip4/127.0.0.1/tcp/8002/p2p/12D3KooWRUoWsUkov4BMRdzpHE9o1MJYKfoPDXTiDhqPM3Qsvtxx"
-libp2p:
-  private_key: "CAESQARJRQAdvXEqx9cbCFgf/gmbhgwM3FG7P4WIaMyzSS//0/HoGYJvzilWa7OIZOFvshjPe/048yauXVGUl0CA0CU="
-  supported_protocols:
-    - "/my-consensus-protocol/1.0.0"
-consensus:
-  algorithm: "raft"
-  raft_config:
-    heartbeat_interval: 1000 # milliseconds
-    election_timeout: 5000 # milliseconds
-  state_store_path: "./raft_data"
-logging:
-  level: "info"
+# Địa chỉ và port mà node sẽ lắng nghe các kết nối đến từ các peer khác.
+# Ví dụ: "/ip4/0.0.0.0/tcp/9001" (lắng nghe trên tất cả các interface IPv4, port 9001, dùng TCP)
+# Hoặc "/ip4/0.0.0.0/udp/9001/quic-v1" (dùng QUIC qua UDP)
+listenAddress: "/ip4/0.0.0.0/udp/8001/quic-v1"
+
+# Khóa riêng tư của node, được mã hóa bằng Base64.
+# Nếu để trống hoặc không có trường này, ManagedNode sẽ tự tạo một khóa mới (hữu ích cho dev/test).
+# Để tạo một khóa: bạn có thể dùng các công cụ libp2p hoặc để node tự tạo lần đầu rồi sao chép ra.
+privateKey: "CAESQARJRQAdvXEqx9cbCFgf/gmbhgwM3FG7P4WIaMyzSS//0/HoGYJvzilWa7OIZOFvshjPe/048yauXVGUl0CA0CU="
+
+# Danh sách các bootstrap peer để node kết nối khi khởi động.
+# Mỗi peer là một multiaddress đầy đủ (bao gồm /p2p/<PeerID>).
+bootstrapPeers:
+  # - "/ip4/127.0.0.1/tcp/8000/p2p/QmSoLnSGhHkUvY1G1tNMQGA8z3y2kL5U9Yp5k2Y3S6kH8C" # Ví dụ, thay thế bằng bootstrap node thực tế
+  # - "/dns4/bootstrap.example.com/tcp/8001/p2p/QmAnotherBootstrapPeerID"
+masterNodeAddress: "/ip4/127.0.0.1/tcp/9000/p2p/12D3KooWM3MudyzXTZTUafyxXQQBNKeK9cpX9QekgB9bPsRwNGvS"
+# Loại của node này (ví dụ: "master", "sub", "validator", "light-client").
+# Logic ứng dụng của bạn có thể dựa vào giá trị này.
+nodeType: "validator"
+
+# Đường dẫn đến thư mục gốc nơi node có thể lưu trữ dữ liệu (ví dụ: database, logs).
+rootPath: "./node_data_validator_1"
+
+# Kích thước buffer cho kênh transaction (nếu ứng dụng của bạn sử dụng).
+transactionChanBuffer: 2000
+
+# Cấu hình quản lý kết nối
+minConnections: 5        # Số kết nối tối thiểu mà node cố gắng duy trì.
+maxConnections: 50       # Số kết nối tối đa được phép.
+connectionGracePeriod: "20s" # Thời gian chờ cho các kết nối mới trước khi connection manager có thể đóng chúng nếu vượt quá maxConnections. (ví dụ: "1m30s")
+initialReconnectDelay: "5s"  # Độ trễ ban đầu trước khi thử kết nối lại với peer đã mất.
+maxReconnectDelay: "1m"      # Độ trễ tối đa giữa các lần thử kết nối lại.
+maxReconnectAttempts: 10       # Số lần thử kết nối lại tối đa trước khi từ bỏ (0 hoặc số âm nghĩa là thử vô hạn).
+pingInterval: "30s"          # Khoảng thời gian giữa các lần ping để kiểm tra peer còn sống.
+pingTimeout: "10s"           # Thời gian chờ tối đa cho một phản hồi ping.
+
+# Cấu hình PubSub
+maxMessageSize: 10485760 # Kích thước message tối đa cho PubSub (tính bằng byte, ví dụ: 10MiB).
+
+# Cấu hình Cache (ví dụ: LRU cache cho key-value)
+keyValueCacheSize: 2000   # Số lượng mục tối đa trong cache.
+
+# (Tùy chọn) Danh sách các protocol ID mà node này hỗ trợ (ngoài các protocol mặc định của libp2p).
+# supportedProtocols:
+#   - "/my-custom-protocol/1.0"
+#   - "/another-app-protocol/0.1"
+
