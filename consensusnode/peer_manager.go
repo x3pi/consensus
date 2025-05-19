@@ -404,48 +404,48 @@ func (mn *ManagedNode) checkAllPeerConnections() {
 	// log.Printf("Kiểm tra sức khỏe peer hoàn tất. Số peer đang kết nối: %d/%d", connectedCount, len(peersToCheck))
 }
 
-// setupConnectionNotifier thiết lập notifier cho các sự kiện kết nối.
-func (mn *ManagedNode) setupConnectionNotifier() {
-	mn.host.Network().Notify(&network.NotifyBundle{
-		ConnectedF: func(net network.Network, conn network.Conn) {
-			peerID := conn.RemotePeer()
-			log.Printf("✅ Đã kết nối tới peer: %s (Địa chỉ: %s)", peerID, conn.RemoteMultiaddr())
+// // setupConnectionNotifier thiết lập notifier cho các sự kiện kết nối.
+// func (mn *ManagedNode) setupConnectionNotifier() {
+// 	mn.host.Network().Notify(&network.NotifyBundle{
+// 		ConnectedF: func(net network.Network, conn network.Conn) {
+// 			peerID := conn.RemotePeer()
+// 			log.Printf("✅ Đã kết nối tới peer: %s (Địa chỉ: %s)", peerID, conn.RemoteMultiaddr())
 
-			mn.peerMutex.RLock() // Dùng RLock vì chỉ đọc pInfo.Type
-			pInfo, exists := mn.peers[peerID]
-			var peerType string
-			if exists {
-				peerType = pInfo.Type
-			} else {
-				peerType = "unknown_inbound"
-			}
-			mn.peerMutex.RUnlock()
+// 			mn.peerMutex.RLock() // Dùng RLock vì chỉ đọc pInfo.Type
+// 			pInfo, exists := mn.peers[peerID]
+// 			var peerType string
+// 			if exists {
+// 				peerType = pInfo.Type
+// 			} else {
+// 				peerType = "unknown_inbound"
+// 			}
+// 			mn.peerMutex.RUnlock()
 
-			mn.updatePeerStatus(peerID, PeerConnected, nil, peerType)
-			mn.host.Peerstore().AddAddr(peerID, conn.RemoteMultiaddr(), peerstore.ConnectedAddrTTL)
-		},
-		DisconnectedF: func(net network.Network, conn network.Conn) {
-			peerID := conn.RemotePeer()
-			log.Printf("❌ Đã ngắt kết nối từ peer: %s", peerID)
+// 			mn.updatePeerStatus(peerID, PeerConnected, nil, peerType)
+// 			mn.host.Peerstore().AddAddr(peerID, conn.RemoteMultiaddr(), peerstore.ConnectedAddrTTL)
+// 		},
+// 		DisconnectedF: func(net network.Network, conn network.Conn) {
+// 			peerID := conn.RemotePeer()
+// 			log.Printf("❌ Đã ngắt kết nối từ peer: %s", peerID)
 
-			mn.peerMutex.RLock()
-			pInfo, exists := mn.peers[peerID]
-			var peerType string
-			if exists {
-				peerType = pInfo.Type
-			}
-			mn.peerMutex.RUnlock()
+// 			mn.peerMutex.RLock()
+// 			pInfo, exists := mn.peers[peerID]
+// 			var peerType string
+// 			if exists {
+// 				peerType = pInfo.Type
+// 			}
+// 			mn.peerMutex.RUnlock()
 
-			mn.updatePeerStatus(peerID, PeerDisconnected, errors.New("đã ngắt kết nối"), peerType)
+// 			mn.updatePeerStatus(peerID, PeerDisconnected, errors.New("đã ngắt kết nối"), peerType)
 
-			// Quyết định xem có cần kết nối lại không
-			if exists && shouldReconnect(pInfo.Type, mn.config) {
-				log.Printf("Lên lịch kết nối lại cho peer quan trọng %s (Loại: %s)", peerID, pInfo.Type)
-				mn.tryReconnectToPeer(peerID, pInfo.Type)
-			}
-		},
-	})
-}
+// 			// Quyết định xem có cần kết nối lại không
+// 			if exists && shouldReconnect(pInfo.Type, mn.config) {
+// 				log.Printf("Lên lịch kết nối lại cho peer quan trọng %s (Loại: %s)", peerID, pInfo.Type)
+// 				mn.tryReconnectToPeer(peerID, pInfo.Type)
+// 			}
+// 		},
+// 	})
+// }
 
 // shouldReconnect kiểm tra xem có nên kết nối lại với một loại peer cụ thể không.
 func shouldReconnect(peerType string, config NodeConfig) bool {

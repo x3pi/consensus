@@ -45,3 +45,4 @@ keyValueCacheSize: 2000   # Số lượng mục tối đa trong cache.
 #   - "/my-custom-protocol/1.0"
 #   - "/another-app-protocol/0.1"
 
+initialStake: 10
