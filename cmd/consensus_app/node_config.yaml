@@ -46,3 +46,5 @@ keyValueCacheSize: 2000   # Số lượng mục tối đa trong cache.
 #   - "/another-app-protocol/0.1"
 
 initialStake: 10
+
+consensusTickInterval: "15s"

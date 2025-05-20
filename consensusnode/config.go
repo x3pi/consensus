@@ -31,7 +31,8 @@ type NodeConfig struct {
 	MaxMessageSize int `yaml:"maxMessageSize"`
 
 	// Cài đặt Cache
-	KeyValueCacheSize int `yaml:"keyValueCacheSize"`
+	KeyValueCacheSize     int           `yaml:"keyValueCacheSize"`
+	ConsensusTickInterval time.Duration `yaml:"consensusTickInterval"`
 
 	// *** THÊM TRƯỜNG NÀY ĐỂ LƯU STAKE BAN ĐẦU CỦA NODE ***
 	InitialStake uint64 `yaml:"initialStake,omitempty"` // Stake ban đầu của node này nếu nó là validator.
