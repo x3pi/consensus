@@ -15,8 +15,7 @@ import (
 // QUORUM là ngưỡng bỏ phiếu (theo stake) cần thiết để quyết định trạng thái Clotho.
 // Ví dụ: 2/3 tổng Stake + 1.
 // Giá trị này cần được đặt dựa trên tổng stake của mạng lưới.
-const QUORUM uint64 = 67 // Ví dụ: giả sử tổng stake của các validator là 100, quorum > 2/3*100
-
+const QUORUM uint64 = 2 // Ví dụ: giả sử tổng stake của các validator là 100, quorum > 2/3*100
 // DagStore là cấu trúc quản lý các Event Block trong DAG và logic Clotho Selection.
 type DagStore struct {
 	events           map[EventID]*Event   // Lưu trữ tất cả các event theo EventID (hash)
@@ -30,12 +29,10 @@ type DagStore struct {
 // NewDagStore tạo một instance mới của DagStore.
 // initialStake: map từ chuỗi hex public key của validator sang stake amount.
 func NewDagStore(initialStake map[string]uint64) *DagStore {
-	// Sao chép initialStake để tránh sửa đổi từ bên ngoài (nếu cần)
+	// Sao chép initialStake để tránh sửa đổi từ bên ngoài
 	stakeMap := make(map[string]uint64)
-	if initialStake != nil {
-		for pubKeyHex, s := range initialStake {
-			stakeMap[pubKeyHex] = s
-		}
+	for pubKeyHex, s := range initialStake {
+		stakeMap[pubKeyHex] = s
 	}
 
 	return &DagStore{
@@ -49,41 +46,32 @@ func NewDagStore(initialStake map[string]uint64) *DagStore {
 }
 
 // AddEvent thêm một event mới vào DagStore.
-// Thực hiện các kiểm tra cơ bản, cập nhật latest event và thêm vào rootsByFrame nếu là root.
 func (ds *DagStore) AddEvent(event *Event) error {
 	if event == nil {
 		return errors.New("cannot add nil event")
 	}
 
-	eventID := event.GetEventId() // Lấy EventID đã được cache hoặc tính toán
+	eventID := event.GetEventId()
 	if eventID.IsZero() {
-		// Hash() đã được gọi trong NewEvent, nếu vẫn zero thì có vấn đề
 		return errors.New("event hash is zero, cannot add to DagStore")
 	}
 
-	ds.mu.Lock() // Khóa ghi khi thêm/cập nhật dữ liệu
+	ds.mu.Lock()
 	defer ds.mu.Unlock()
 
-	// 1. Kiểm tra xem event đã tồn tại chưa
 	if _, exists := ds.events[eventID]; exists {
-		// Event đã tồn tại, không coi là lỗi nghiêm trọng, chỉ log và bỏ qua
-		// log.Printf("DagStore.AddEvent: Event with ID %s already exists, skipping.", eventID.String())
-		return nil // Không trả về lỗi để quá trình đồng bộ có thể tiếp tục với các event khác
+		return nil
 	}
 
-	// Lấy creator public key dạng hex string làm key cho map latestEvents và stake
 	creatorKey := hex.EncodeToString(event.EventData.Creator)
 
-	// 2. Kiểm tra tính hợp lệ cơ bản của SelfParent
 	currentLatestEventID, creatorHasPrevious := ds.latestEvents[creatorKey]
 	if creatorHasPrevious {
-		if event.EventData.SelfParent.IsZero() && event.EventData.Index > 1 { // Chỉ event đầu tiên (index 1) mới có self-parent zero
+		if event.EventData.SelfParent.IsZero() && event.EventData.Index > 1 {
 			return fmt.Errorf("event %s by %s (Index %d) has zero self parent but creator has previous events (latest: %s, Index %d) and index > 1",
 				eventID.String()[:6], creatorKey, event.EventData.Index, currentLatestEventID.String()[:6], ds.events[currentLatestEventID].EventData.Index)
 		}
-		// Chỉ kiểm tra self-parent nếu event.Index > 1
 		if event.EventData.Index > 1 && event.EventData.SelfParent != currentLatestEventID {
-			// Lấy index của self-parent để so sánh
 			var expectedIndex uint64
 			if selfParentEvent, ok := ds.events[currentLatestEventID]; ok {
 				expectedIndex = selfParentEvent.EventData.Index
@@ -93,7 +81,6 @@ func (ds *DagStore) AddEvent(event *Event) error {
 				currentLatestEventID.String()[:6], expectedIndex,
 				event.EventData.SelfParent.String()[:6], event.EventData.Index-1)
 		}
-		// Kiểm tra index phải tăng dần
 		if prevEvent, ok := ds.events[currentLatestEventID]; ok {
 			if event.EventData.Index != prevEvent.EventData.Index+1 {
 				return fmt.Errorf("invalid index for event %s by %s: expected %d, got %d",
@@ -101,20 +88,18 @@ func (ds *DagStore) AddEvent(event *Event) error {
 			}
 		}
 
-	} else { // Event đầu tiên của creator
+	} else {
 		if !event.EventData.SelfParent.IsZero() {
 			return fmt.Errorf("first event %s of creator %s must have zero self parent, got %s", eventID.String()[:6], creatorKey, event.EventData.SelfParent.String()[:6])
 		}
 		if event.EventData.Index != 1 {
 			return fmt.Errorf("first event %s of creator %s must have index 1, got %d", eventID.String()[:6], creatorKey, event.EventData.Index)
 		}
-		// Kiểm tra xem creator có stake không (quan trọng nếu là validator)
 		if _, exists := ds.stake[creatorKey]; !exists {
 			log.Printf("DagStore.AddEvent: Warning - Creator %s (%s) adding first event but has no registered stake.", creatorKey, eventID.String()[:6])
 		}
 	}
 
-	// 3. Kiểm tra xem OtherParents có tồn tại trong store không
 	for _, otherParentID := range event.EventData.OtherParents {
 		if otherParentID.IsZero() {
 			continue
@@ -124,15 +109,12 @@ func (ds *DagStore) AddEvent(event *Event) error {
 		}
 	}
 
-	// 4. Lưu event vào store
 	ds.events[eventID] = event
 
-	// 5. Cập nhật latest event cho creator này, chỉ nếu event mới này có index lớn hơn
 	if !creatorHasPrevious || (ds.events[currentLatestEventID] != nil && event.EventData.Index > ds.events[currentLatestEventID].EventData.Index) {
 		ds.latestEvents[creatorKey] = eventID
 	}
 
-	// 6. Nếu event là Root, thêm vào danh sách rootsByFrame
 	if event.EventData.IsRoot {
 		isAlreadyRoot := false
 		for _, existingRootID := range ds.rootsByFrame[event.EventData.Frame] {
@@ -155,7 +137,7 @@ func (ds *DagStore) AddEvent(event *Event) error {
 
 // GetEvent lấy một event từ store bằng EventID của nó.
 func (ds *DagStore) GetEvent(id EventID) (*Event, bool) {
-	ds.mu.RLock() // Khóa đọc
+	ds.mu.RLock()
 	defer ds.mu.RUnlock()
 	event, exists := ds.events[id]
 	return event, exists
@@ -163,7 +145,7 @@ func (ds *DagStore) GetEvent(id EventID) (*Event, bool) {
 
 // EventExists kiểm tra xem một event có tồn tại trong store không bằng EventID của nó.
 func (ds *DagStore) EventExists(id EventID) bool {
-	ds.mu.RLock() // Khóa đọc
+	ds.mu.RLock()
 	defer ds.mu.RUnlock()
 	_, exists := ds.events[id]
 	return exists
@@ -171,7 +153,7 @@ func (ds *DagStore) EventExists(id EventID) bool {
 
 // GetLatestEventIDByCreatorPubKeyHex trả về EventID mới nhất được tạo bởi một creator cụ thể.
 func (ds *DagStore) GetLatestEventIDByCreatorPubKeyHex(creatorPubKeyHex string) (EventID, bool) {
-	ds.mu.RLock() // Khóa đọc
+	ds.mu.RLock()
 	defer ds.mu.RUnlock()
 	eventID, exists := ds.latestEvents[creatorPubKeyHex]
 	return eventID, exists
@@ -197,10 +179,8 @@ func (ds *DagStore) GetLastDecidedFrame() uint64 {
 	return ds.lastDecidedFrame
 }
 
-// getStake lấy stake của một validator dựa trên chuỗi hex public key.
-// Hàm này giả định lock đã được giữ bởi hàm gọi nó nếu cần.
+// getStakeLocked lấy stake của một validator dựa trên chuỗi hex public key.
 func (ds *DagStore) getStakeLocked(creatorPubKeyHex string) uint64 {
-	// Không RLock ở đây vì hàm này được thiết kế để gọi khi lock đã được giữ
 	stake, exists := ds.stake[creatorPubKeyHex]
 	if !exists {
 		return 0
@@ -209,11 +189,7 @@ func (ds *DagStore) getStakeLocked(creatorPubKeyHex string) uint64 {
 }
 
 // isAncestorLocked kiểm tra xem event ancestorID có phải là tổ tiên của event descendantID không.
-// Hàm này KHÔNG tự quản lý lock, nó giả định lock đã được giữ bởi hàm gọi nó.
-// Sử dụng BFS để duyệt ngược từ descendantID.
 func (ds *DagStore) isAncestorLocked(ancestorID, descendantID EventID) bool {
-	// KHÔNG CÓ ds.mu.RLock() ở đây
-
 	if ancestorID == descendantID {
 		return true
 	}
@@ -232,9 +208,8 @@ func (ds *DagStore) isAncestorLocked(ancestorID, descendantID EventID) bool {
 		currentID := queue[0]
 		queue = queue[1:]
 
-		currentEvent, exists := ds.events[currentID] // Truy cập trực tiếp ds.events
+		currentEvent, exists := ds.events[currentID]
 		if !exists {
-			// Sử dụng logger.Warn hoặc log.Printf tùy theo chuẩn của bạn
 			logger.Warn(fmt.Sprintf("DagStore.isAncestorLocked: Warning - Event %s not found in store during check for descendant %s, ancestor %s",
 				currentID.String()[:6], descendantID.String()[:6], ancestorID.String()[:6]))
 			continue
@@ -272,25 +247,21 @@ func (ds *DagStore) IsAncestor(ancestorID, descendantID EventID) bool {
 }
 
 // forklessCause kiểm tra xem event x có "forkless cause" event y không.
-// Hàm này giả định lock đã được giữ bởi hàm gọi nó (ví dụ: DecideClotho).
 func (ds *DagStore) forklessCause(x, y *Event) bool {
 	if x == nil || y == nil {
 		return false
 	}
-	// Gọi isAncestorLocked vì DecideClotho đã giữ ds.mu.Lock()
 	return ds.isAncestorLocked(x.GetEventId(), y.GetEventId())
 }
 
 // DecideClotho thực hiện thuật toán lựa chọn Clotho.
-// Nó duyệt qua các Root và tính toán phiếu bầu để quyết định trạng thái Clotho.
 func (ds *DagStore) DecideClotho() {
-	ds.mu.Lock() // Khóa ghi cho toàn bộ quá trình quyết định
+	ds.mu.Lock()
 	defer ds.mu.Unlock()
-	logger.Info("DecideClotho: Bắt đầu") // Sử dụng logger của bạn
+	logger.Info("DecideClotho: Bắt đầu")
 
 	startFrame := ds.lastDecidedFrame + 1
-	var maxFrame uint64 = 0 // Khởi tạo maxFrame
-	// Tìm frame cao nhất hiện có các roots để biết giới hạn duyệt
+	var maxFrame uint64 = 0
 	for frame := range ds.rootsByFrame {
 		if frame > maxFrame {
 			maxFrame = frame
@@ -303,13 +274,11 @@ func (ds *DagStore) DecideClotho() {
 		return
 	}
 
-	// Duyệt qua các Root (x) từ frame sau frame cuối cùng đã quyết định
 	for xFrame := startFrame; xFrame <= maxFrame; xFrame++ {
 		logger.Info(fmt.Sprintf("DecideClotho: Đang xử lý xFrame = %d", xFrame))
 		xRootsIDsInCurrentXFrame := ds.rootsByFrame[xFrame]
 		if len(xRootsIDsInCurrentXFrame) == 0 {
 			logger.Info(fmt.Sprintf("DecideClotho: Không có root nào trong xFrame %d.", xFrame))
-			// Nếu frame này rỗng, nó sẽ được coi là "quyết định xong" ở phần kiểm tra allRootsInXFrameDecided
 		}
 
 		xEventsToProcess := make([]*Event, 0, len(xRootsIDsInCurrentXFrame))
@@ -323,8 +292,6 @@ func (ds *DagStore) DecideClotho() {
 		if len(xEventsToProcess) == 0 {
 			if len(xRootsIDsInCurrentXFrame) > 0 {
 				logger.Info(fmt.Sprintf("DecideClotho: Tất cả các root trong xFrame %d đã được quyết định trước đó.", xFrame))
-			} else {
-				// Đã log ở trên là không có root
 			}
 		} else {
 			logger.Info(fmt.Sprintf("DecideClotho: Tìm thấy %d root chưa quyết định trong xFrame %d để xử lý.", len(xEventsToProcess), xFrame))
@@ -336,10 +303,8 @@ func (ds *DagStore) DecideClotho() {
 			logger.Info(fmt.Sprintf("DecideClotho: Đang xử lý xEvent %s (Frame %d)", xID.String()[:6], xFrame))
 
 			for yFrame := xFrame + 1; yFrame <= maxFrame; yFrame++ {
-				// logger.Info(fmt.Sprintf("DecideClotho:  -> Đang xử lý yFrame = %d cho xEvent %s", yFrame, xID.String()[:6]))
 				yRootsIDsInCurrentYFrame := ds.rootsByFrame[yFrame]
 				if len(yRootsIDsInCurrentYFrame) == 0 {
-					// logger.Info(fmt.Sprintf("DecideClotho:  -> Không có root nào trong yFrame %d", yFrame))
 					continue
 				}
 
@@ -350,12 +315,10 @@ func (ds *DagStore) DecideClotho() {
 					}
 
 					round := yEvent.EventData.Frame - xEvent.EventData.Frame
-					// logger.Info(fmt.Sprintf("DecideClotho:  -> yEvent %s (Frame %d), round %d", yID.String()[:6], yFrame, round))
 
 					if round == 1 {
-						vote := ds.forklessCause(xEvent, yEvent) // forklessCause gọi isAncestorLocked
+						vote := ds.forklessCause(xEvent, yEvent)
 						yEvent.SetVote(xID, vote)
-						// logger.Info(fmt.Sprintf("DecideClotho:  R1: Root %s (F%d) votes %t cho Root %s (F%d)", yID.String()[:6], yFrame, vote, xID.String()[:6], xFrame))
 					} else if round >= 2 {
 						prevVotersFrame := yFrame - 1
 						prevVotersIDs := ds.rootsByFrame[prevVotersFrame]
@@ -369,10 +332,10 @@ func (ds *DagStore) DecideClotho() {
 								continue
 							}
 
-							if ds.forklessCause(prevRootEvent, yEvent) { // forklessCause gọi isAncestorLocked
+							if ds.forklessCause(prevRootEvent, yEvent) {
 								prevVote, voteExists := prevRootEvent.GetVote(xID)
 								if voteExists {
-									prevVoterStake := ds.getStakeLocked(hex.EncodeToString(prevRootEvent.EventData.Creator)) // Sử dụng getStakeLocked
+									prevVoterStake := ds.getStakeLocked(hex.EncodeToString(prevRootEvent.EventData.Creator))
 									if prevVote {
 										yesVotesStake += prevVoterStake
 									} else {
@@ -384,8 +347,6 @@ func (ds *DagStore) DecideClotho() {
 
 						yFinalVote := (yesVotesStake >= noVotesStake)
 						yEvent.SetVote(xID, yFinalVote)
-						// logger.Info(fmt.Sprintf("DecideClotho:  R%d: Root %s (F%d) votes %t cho %s (F%d) (YesS: %d, NoS: %d)",
-						// round, yID.String()[:6], yFrame, yFinalVote, xID.String()[:6], xFrame, yesVotesStake, noVotesStake))
 
 						if yesVotesStake >= QUORUM {
 							xEvent.SetCandidate(true)
@@ -402,13 +363,13 @@ func (ds *DagStore) DecideClotho() {
 							continue next_x_event_processing_loop
 						}
 					}
-				} // Kết thúc vòng lặp qua yID
-			} // Kết thúc vòng lặp qua yFrame
+				}
+			}
 
 			if xEvent.ClothoStatus == ClothoUndecided {
 				logger.Info(fmt.Sprintf("DecideClotho: Root %s (F%d) vẫn UNDECIDED sau khi kiểm tra tất cả y-frames đến %d", xID.String()[:6], xFrame, maxFrame))
 			}
-		} // Kết thúc vòng lặp qua xEvent (next_x_event_processing_loop)
+		}
 		logger.Info(fmt.Sprintf("DecideClotho: Hoàn tất xử lý các xEvent cho xFrame %d", xFrame))
 
 		allRootsInXFrameDecided := true
@@ -422,7 +383,7 @@ func (ds *DagStore) DecideClotho() {
 				}
 			}
 		} else {
-			allRootsInXFrameDecided = true // Frame rỗng được coi là đã quyết định
+			allRootsInXFrameDecided = true
 			logger.Info(fmt.Sprintf("DecideClotho: xFrame %d rỗng, coi như đã quyết định.", xFrame))
 		}
 
@@ -433,10 +394,113 @@ func (ds *DagStore) DecideClotho() {
 			logger.Info(fmt.Sprintf("DecideClotho: Cập nhật lastDecidedFrame thành %d.", ds.lastDecidedFrame))
 		} else {
 			logger.Info(fmt.Sprintf("DecideClotho: xFrame %d chưa được quyết định hoàn toàn. Dừng DecideClotho cho các frame sau. lastDecidedFrame hiện tại: %d.", xFrame, ds.lastDecidedFrame))
-			break // Thoát khỏi vòng lặp duyệt các xFrame
+			break
 		}
-	} // Kết thúc vòng lặp qua xFrame
+	}
 	logger.Info(fmt.Sprintf("DecideClotho: Kết thúc. lastDecidedFrame cuối cùng: %d", ds.lastDecidedFrame))
+}
+
+// PruneOldEvents loại bỏ các event từ các frame cũ hơn oldestFrameToKeep.
+// oldestFrameToKeep là frame CŨ NHẤT mà bạn muốn GIỮ LẠI.
+// Các event thuộc frame < oldestFrameToKeep sẽ bị xóa.
+func (ds *DagStore) PruneOldEvents(oldestFrameToKeep uint64) {
+	ds.mu.Lock()
+	defer ds.mu.Unlock()
+
+	logger.Info(fmt.Sprintf("PruneOldEvents: Bắt đầu dọn dẹp các event thuộc frame cũ hơn %d. lastDecidedFrame hiện tại: %d", oldestFrameToKeep, ds.lastDecidedFrame))
+
+	if oldestFrameToKeep == 0 { // Không cho phép xóa frame 0 nếu frame 0 có ý nghĩa đặc biệt
+		logger.Warn("PruneOldEvents: oldestFrameToKeep là 0, không thực hiện dọn dẹp để tránh xóa frame gốc.")
+		return
+	}
+
+	// Điều kiện an toàn: Chỉ cho phép pruning nếu oldestFrameToKeep thực sự cũ hơn hoặc bằng frame đã quyết định gần nhất.
+	// Hoặc, bạn có thể muốn một khoảng cách an toàn, ví dụ: oldestFrameToKeep <= ds.lastDecidedFrame - K
+	// Hiện tại, chúng ta cho phép pruning đến (nhưng không bao gồm) oldestFrameToKeep,
+	// và oldestFrameToKeep phải nhỏ hơn hoặc bằng lastDecidedFrame + 1 (nghĩa là có thể xóa tất cả các frame đã quyết định).
+	// Để đơn giản, nếu oldestFrameToKeep > ds.lastDecidedFrame + 1, có nghĩa là đang yêu cầu giữ lại frame chưa được quyết định, điều này không an toàn.
+	// Một cách tiếp cận an toàn là chỉ prune các frame đã được quyết định và cũ hơn một ngưỡng nào đó.
+	// Ví dụ, chỉ prune nếu oldestFrameToKeep <= ds.lastDecidedFrame.
+	if oldestFrameToKeep > ds.lastDecidedFrame+1 { // +1 vì lastDecidedFrame là frame cuối cùng đã quyết định, ta muốn giữ nó lại ít nhất
+		logger.Info(fmt.Sprintf("PruneOldEvents: Chưa thể dọn dẹp đến frame %d vì lastDecidedFrame mới chỉ là %d. Cần đợi thêm frame được quyết định.", oldestFrameToKeep, ds.lastDecidedFrame))
+		return
+	}
+
+	eventsToDelete := make(map[EventID]struct{}) // Sử dụng map để tránh trùng lặp và xóa hiệu quả
+
+	// 1. Xác định các event cần xóa từ ds.events
+	for id, event := range ds.events {
+		if event.EventData.Frame < oldestFrameToKeep {
+			eventsToDelete[id] = struct{}{}
+		}
+	}
+
+	if len(eventsToDelete) == 0 {
+		logger.Info(fmt.Sprintf("PruneOldEvents: Không có event nào cũ hơn frame %d để xóa.", oldestFrameToKeep))
+		return
+	}
+
+	logger.Info(fmt.Sprintf("PruneOldEvents: Sẽ xóa %d event.", len(eventsToDelete)))
+
+	// 2. Xóa các event đã xác định khỏi ds.events
+	for id := range eventsToDelete {
+		delete(ds.events, id)
+	}
+
+	// 3. Dọn dẹp ds.rootsByFrame
+	// Xóa toàn bộ các entry frame cũ hơn oldestFrameToKeep
+	for frame := range ds.rootsByFrame {
+		if frame < oldestFrameToKeep {
+			delete(ds.rootsByFrame, frame)
+		} else {
+			// Đối với các frame còn lại, lọc ra các rootID đã bị xóa
+			var validRoots []EventID
+			for _, rootID := range ds.rootsByFrame[frame] {
+				if _, deleted := eventsToDelete[rootID]; !deleted {
+					validRoots = append(validRoots, rootID)
+				}
+			}
+			if len(validRoots) == 0 && len(ds.rootsByFrame[frame]) > 0 { // Nếu frame từng có root nhưng giờ không còn root nào hợp lệ
+				delete(ds.rootsByFrame, frame)
+			} else {
+				ds.rootsByFrame[frame] = validRoots
+			}
+		}
+	}
+
+	// 4. Dọn dẹp ds.latestEvents
+	// Nếu latestEvent của một creator đã bị xóa, cần cập nhật lại nó.
+	// Đây là phần phức tạp hơn nếu muốn tìm lại chính xác latest event mới.
+	// Cách đơn giản: xóa entry nếu latestEvent đã bị prune.
+	for creator, latestID := range ds.latestEvents {
+		if _, deleted := eventsToDelete[latestID]; deleted {
+			delete(ds.latestEvents, creator)
+			logger.Info(fmt.Sprintf("PruneOldEvents: Latest event của creator %s (ID: %s) đã bị xóa, xóa entry khỏi latestEvents.", creator[:6], latestID.String()[:6]))
+			// TODO: Để hoàn thiện hơn, cần duyệt lại các event còn lại của `creator`
+			// để tìm event có index cao nhất và cập nhật lại `ds.latestEvents[creator]`.
+			// Điều này quan trọng để đảm bảo tính đúng đắn của việc tạo event mới (SelfParent).
+			// Ví dụ:
+			// var newLatestEventForCreator *Event = nil
+			// for _, evt := range ds.events { // Duyệt các event còn lại
+			//     if hex.EncodeToString(evt.EventData.Creator) == creator {
+			//         if newLatestEventForCreator == nil || evt.EventData.Index > newLatestEventForCreator.EventData.Index {
+			//             newLatestEventForCreator = evt
+			//         }
+			//     }
+			// }
+			// if newLatestEventForCreator != nil {
+			//     ds.latestEvents[creator] = newLatestEventForCreator.GetEventId()
+			//     logger.Info(fmt.Sprintf("PruneOldEvents: Đã cập nhật latest event cho creator %s thành %s (Index: %d)", creator[:6], newLatestEventForCreator.GetEventId().String()[:6], newLatestEventForCreator.EventData.Index))
+			// }
+		}
+	}
+
+	// Không nên tự ý thay đổi ds.lastDecidedFrame ở đây.
+	// lastDecidedFrame chỉ nên được cập nhật bởi DecideClotho.
+	// Việc pruning chỉ xóa dữ liệu cũ, không làm thay đổi logic quyết định frame.
+
+	logger.Info(fmt.Sprintf("PruneOldEvents: Hoàn tất. Đã xóa %d event. Số event còn lại: %d. Số rootsByFrame còn lại: %d. Số latestEvents còn lại: %d",
+		len(eventsToDelete), len(ds.events), len(ds.rootsByFrame), len(ds.latestEvents)))
 }
 
 // GetDecidedRoots trả về một map các EventID tới *Event cho các root đã có quyết định Clotho.
@@ -559,16 +623,13 @@ func (ds *DagStore) GetEventsByCreatorSinceIndex(creatorPubKeyHex string, startI
 	var result []*Event
 	creatorBytes, err := hex.DecodeString(creatorPubKeyHex)
 	if err != nil {
-		log.Printf("DagStore.GetEventsByCreatorSinceIndex: Invalid creatorPubKeyHex %s: %v", creatorPubKeyHex, err)
+		// Nên sử dụng logger của bạn ở đây thay vì log.Printf
+		logger.Error(fmt.Sprintf("DagStore.GetEventsByCreatorSinceIndex: Invalid creatorPubKeyHex %s: %v", creatorPubKeyHex, err))
 		return result
 	}
 
-	// Tối ưu hóa: Duyệt từ latestEvent của creator ngược về trước nếu cần
-	// Hoặc cần một cấu trúc dữ liệu phụ trợ: map[creatorPubKeyHex][index]*Event
-	// Hiện tại, duyệt tất cả event:
 	var tempEvents []*Event
 	for _, event := range ds.events {
-		// So sánh byte slices cho creator
 		isSameCreator := true
 		if len(event.EventData.Creator) != len(creatorBytes) {
 			isSameCreator = false
@@ -586,7 +647,6 @@ func (ds *DagStore) GetEventsByCreatorSinceIndex(creatorPubKeyHex string, startI
 		}
 	}
 
-	// Sắp xếp kết quả theo index
 	sort.Slice(tempEvents, func(i, j int) bool {
 		return tempEvents[i].EventData.Index < tempEvents[j].EventData.Index
 	})

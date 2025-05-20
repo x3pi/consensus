@@ -76,6 +76,14 @@ type ManagedNode struct {
 	peerPubKeyMutex      sync.RWMutex // Mutex cho connectedPeerPubKeys
 }
 
+const (
+	// FRAMES_TO_KEEP_AFTER_FINALIZED xác định số lượng frame gần nhất đã hoàn tất mà chúng ta muốn giữ lại.
+	// Các frame cũ hơn (lastProcessedFinalizedFrame - FRAMES_TO_KEEP_AFTER_FINALIZED) sẽ bị prune.
+	FRAMES_TO_KEEP_AFTER_FINALIZED uint64 = 10 // Ví dụ: giữ lại 10 frame
+	// MIN_FRAMES_BEFORE_PRUNING là số frame tối thiểu phải được xử lý trước khi bắt đầu pruning.
+	MIN_FRAMES_BEFORE_PRUNING uint64 = FRAMES_TO_KEEP_AFTER_FINALIZED + 5 // Ví dụ: cần ít nhất 15 frame đã xử lý
+)
+
 // NewManagedNode tạo và khởi tạo một ManagedNode mới.
 func NewManagedNode(ctx context.Context, cfg NodeConfig) (*ManagedNode, error) {
 	privKey, err := loadPrivateKey(cfg.PrivateKey) // utils.go
@@ -538,6 +546,19 @@ func (mn *ManagedNode) consensusLoop() {
 				}
 				mn.lastProcessedFinalizedFrame = maxProcessedFrameThisRound
 				log.Printf("CONSENSUS_LOOP: Đã cập nhật lastProcessedFinalizedFrame thành %d", mn.lastProcessedFinalizedFrame)
+
+				// **GỌI PRUNING SAU KHI XỬ LÝ CÁC FRAME HOÀN TẤT**
+				// if mn.lastProcessedFinalizedFrame >= MIN_FRAMES_BEFORE_PRUNING {
+				// 	// oldestFrameToKeep là frame CŨ NHẤT mà chúng ta muốn GIỮ LẠI.
+				// 	// Các frame < oldestFrameToKeep sẽ bị xóa.
+				// 	// Chúng ta muốn giữ lại FRAMES_TO_KEEP_AFTER_FINALIZED frame gần nhất đã được xử lý.
+				// 	oldestFrameToKeep := mn.lastProcessedFinalizedFrame - FRAMES_TO_KEEP_AFTER_FINALIZED + 1
+				// 	if oldestFrameToKeep <= 0 { // Đảm bảo không xóa frame 0 hoặc frame âm
+				// 		oldestFrameToKeep = 1
+				// 	}
+				// 	log.Printf("CONSENSUS_LOOP: Gọi PruneOldEvents với oldestFrameToKeep = %d", oldestFrameToKeep)
+				// 	mn.dagStore.PruneOldEvents(oldestFrameToKeep)
+				// }
 			} else {
 				log.Printf("CONSENSUS_LOOP: Không có Root nào mới được hoàn tất (Clotho). Tiến hành tạo event mới và đồng bộ.")
 
