@@ -2,6 +2,7 @@ package consensusnode
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -16,6 +17,7 @@ import (
 // --- Protocol IDs ---
 const TransactionsRequestProtocol protocol.ID = "/meta-node/transactions-request/1.0.0"
 const TransactionStreamProtocol protocol.ID = "/meta-node/transaction-stream/1.0.0"
+const SyncRequestProtocol protocol.ID = "/meta-node/sync-request/1.0.0"
 
 // transactionsRequestHandler xử lý các yêu cầu đến cho TransactionsRequestProtocol.
 // Hàm này sẽ đọc yêu cầu, xử lý (ví dụ), và gửi lại phản hồi.
@@ -99,6 +101,146 @@ func (mn *ManagedNode) transactionsRequestHandler(stream network.Stream) {
 	// Client (trong SendRequest) sẽ gọi stream.CloseWrite() sau khi gửi yêu cầu,
 	// điều này báo cho server biết client đã gửi xong.
 	// Server, sau khi ghi phản hồi, stream sẽ được đóng bởi defer.
+}
+
+// syncRequestHandler xử lý các yêu cầu đồng bộ đến.
+func (mn *ManagedNode) syncRequestHandler(stream network.Stream) {
+	remotePeerID := stream.Conn().RemotePeer()
+	log.Printf("SYNC_HANDLER: Đã nhận SyncRequestProtocol từ peer: %s", remotePeerID)
+
+	defer func() {
+		if errClose := stream.Close(); errClose != nil {
+			log.Printf("SYNC_HANDLER: Lỗi khi đóng stream từ %s: %v", remotePeerID, errClose)
+		} else {
+			log.Printf("SYNC_HANDLER: Đã đóng stream từ %s", remotePeerID)
+		}
+	}()
+
+	// Đọc dữ liệu yêu cầu từ stream
+	// Giới hạn kích thước đọc để tránh tấn công DoS hoặc lỗi do message quá lớn
+	limitedReader := io.LimitReader(stream, int64(mn.config.MaxMessageSize)) // Sử dụng MaxMessageSize từ config
+	requestBytes, err := io.ReadAll(limitedReader)
+	if err != nil {
+		log.Printf("SYNC_HANDLER: Lỗi đọc dữ liệu yêu cầu đồng bộ từ peer %s: %v", remotePeerID, err)
+		_ = stream.Reset() // Reset stream nếu có lỗi đọc
+		return
+	}
+
+	if len(requestBytes) == 0 {
+		log.Printf("SYNC_HANDLER: Yêu cầu đồng bộ từ peer %s không có dữ liệu.", remotePeerID)
+		// Quyết định cách xử lý: gửi lỗi lại hoặc chỉ đóng stream
+		// Ví dụ: gửi lại lỗi
+		// responsePayload := []byte("{\"error\": \"empty sync request payload\"}")
+		// _, writeErr := stream.Write(responsePayload)
+		// if writeErr != nil {
+		// 	log.Printf("SYNC_HANDLER: Lỗi ghi phản hồi lỗi (empty sync request) vào stream cho peer %s: %v", remotePeerID, writeErr)
+		// }
+		_ = stream.Reset() // Reset sau khi gửi lỗi hoặc nếu không gửi gì
+		return
+	}
+
+	log.Printf("SYNC_HANDLER: Đã nhận yêu cầu đồng bộ (%d bytes) từ %s: %s", len(requestBytes), remotePeerID, string(requestBytes))
+
+	// --- XỬ LÝ YÊU CẦU ĐỒNG BỘ THỰC TẾ TẠI ĐÂY ---
+	// 1. Phân tích cú pháp requestBytes. Nó có thể chứa thông tin về trạng thái của node yêu cầu.
+	// Ví dụ: Phân tích JSON để lấy requester_node_id, latest_event_id
+	var syncReqPayload struct {
+		Action          string `json:"action"`
+		RequesterNodeID string `json:"requester_node_id"` // Public key hex của node yêu cầu
+		LatestEventID   string `json:"latest_event_id"`   // Event ID mới nhất mà node yêu cầu biết
+		Timestamp       int64  `json:"timestamp"`
+	}
+	if err := json.Unmarshal(requestBytes, &syncReqPayload); err != nil {
+		log.Printf("SYNC_HANDLER: Lỗi unmarshal yêu cầu đồng bộ từ %s: %v. Payload: %s", remotePeerID, err, string(requestBytes))
+		responsePayload := []byte("{\"error\": \"invalid sync request payload format\"}")
+		_, writeErr := stream.Write(responsePayload)
+		if writeErr != nil {
+			log.Printf("SYNC_HANDLER: Lỗi ghi phản hồi lỗi (invalid format) vào stream cho peer %s: %v", remotePeerID, writeErr)
+		}
+		_ = stream.Reset()
+		return
+	}
+
+	log.Printf("SYNC_HANDLER: Đã phân tích yêu cầu đồng bộ từ Node ID %s, Latest Event ID đã biết: '%s'", syncReqPayload.RequesterNodeID, syncReqPayload.LatestEventID)
+
+	// 2. Dựa trên yêu cầu, xác định dữ liệu nào mà node yêu cầu cần.
+	// Đây là phần cốt lõi của logic đồng bộ của bạn. Bạn có thể cần:
+	//    - So sánh latest_event_id của node yêu cầu với DAG của bạn.
+	//    - Tìm các event mà node yêu cầu đang thiếu.
+	//    - Thu thập các event này (hoặc hash của chúng, hoặc một bản tóm tắt).
+
+	// Logic ví dụ: Gửi lại các event mà node này có nhưng node yêu cầu có thể không có.
+	// Đây là một logic rất đơn giản và cần được cải thiện cho một hệ thống thực tế.
+	// var eventsToSend []*dag.Event
+	var marshaledEventsData [][]byte
+
+	// Lấy tất cả các event từ store của node hiện tại (đây chỉ là ví dụ, bạn cần logic phức tạp hơn)
+	// Ví dụ: lấy các event sau một event cụ thể mà requester đã biết, hoặc các event trong một frame nhất định.
+	// Để minh họa, chúng ta sẽ thử lấy một số event gần đây của chính node này.
+	// ownPubKeyHex, _ := mn.getOwnPublicKeyHex() // Lấy pubkey của node hiện tại (node xử lý request)
+	// latestOwnEventID, exists := mn.dagStore.GetLatestEventIDByCreatorPubKeyHex(ownPubKeyHex)
+	// if exists {
+	// 	currentEvent, _ := mn.dagStore.GetEvent(latestOwnEventID)
+	// 	// Lặp ngược lại một số self-parent để lấy vài event
+	// 	for i := 0; i < 5 && currentEvent != nil; i++ { // Gửi tối đa 5 event
+	// 		// Cần kiểm tra xem requester có event này chưa dựa trên syncReqPayload.LatestEventID
+	// 		// Nếu latestEventID của requester là X, và X là tổ tiên của currentEvent, thì currentEvent có thể là mới với requester.
+	// 		// Logic isAncestor(requesterLatestEvent, currentEvent)
+	// 		eventsToSend = append(eventsToSend, currentEvent)
+	// 		if currentEvent.EventData.SelfParent.IsZero() {
+	// 			break
+	// 		}
+	// 		currentEvent, _ = mn.dagStore.GetEvent(currentEvent.EventData.SelfParent)
+	// 	}
+	// }
+	// Chuyển eventsToSend thành dạng []byte
+	// for _, event := range eventsToSend {
+	// 	eventBytes, err := event.Marshal() // Sử dụng Marshal từ dag/event.go
+	// 	if err != nil {
+	// 		log.Printf("SYNC_HANDLER: Lỗi marshal event %s cho phản hồi đồng bộ: %v", event.GetEventId().String(), err)
+	// 		continue // Bỏ qua event này nếu không marshal được
+	// 	}
+	// 	marshaledEventsData = append(marshaledEventsData, eventBytes)
+	// }
+
+	// Phản hồi ví dụ đơn giản:
+	// Trong một kịch bản thực tế, bạn sẽ xây dựng responseData dựa trên logic so sánh DAG.
+	// Ví dụ: responseData có thể là một struct chứa danh sách các event (đã marshal).
+	// type SyncResponsePayload struct {
+	// 	 RequesterNodeID string   `json:"requester_node_id"`
+	// 	 KnownLatestEventID string `json:"known_latest_event_id"`
+	// 	 MissingEvents [][]byte `json:"missing_events"` // Slice của các event đã được marshal
+	//   NewHeadEvents []string `json:"new_head_events"` // Hoặc chỉ gửi các head mới
+	// }
+	// currentResponseData := SyncResponsePayload{
+	// 	RequesterNodeID: syncReqPayload.RequesterNodeID,
+	// 	KnownLatestEventID: syncReqPayload.LatestEventID,
+	// 	MissingEvents: marshaledEventsData,
+	// }
+	// responsePayloadBytes, err := json.Marshal(currentResponseData)
+	// if err != nil {
+	// 	log.Printf("SYNC_HANDLER: Lỗi marshal phản hồi đồng bộ cho %s: %v", remotePeerID, err)
+	//    responsePayloadBytes = []byte("{\"error\": \"internal server error during sync response generation\"}")
+	// }
+
+	// Phản hồi placeholder đơn giản cho mục đích gỡ lỗi:
+	responsePayloadBytes := []byte(fmt.Sprintf("{\"status\": \"sync_acknowledged\", \"message\": \"Sync request from %s processed. Events to send: %d. Requester latest event: %s\"}",
+		syncReqPayload.RequesterNodeID, len(marshaledEventsData), syncReqPayload.LatestEventID))
+
+	// 3. Gửi phản hồi trở lại stream
+	if responsePayloadBytes != nil {
+		bytesWritten, writeErr := stream.Write(responsePayloadBytes)
+		if writeErr != nil {
+			log.Printf("SYNC_HANDLER: Lỗi ghi phản hồi đồng bộ vào stream cho peer %s: %v", remotePeerID, writeErr)
+			_ = stream.Reset() // Reset stream nếu có lỗi ghi
+			return
+		}
+		log.Printf("SYNC_HANDLER: Đã gửi phản hồi đồng bộ (%d bytes) cho peer %s", bytesWritten, remotePeerID)
+	} else {
+		log.Printf("SYNC_HANDLER: Không có phản hồi đồng bộ nào được chuẩn bị để gửi cho peer %s", remotePeerID)
+	}
+
+	// stream.Close() đã được defer ở trên.
 }
 
 // --- Quản lý Stream Handler ---

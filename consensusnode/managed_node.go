@@ -188,8 +188,11 @@ func NewManagedNode(ctx context.Context, cfg NodeConfig) (*ManagedNode, error) {
 	}
 
 	if mn.config.NodeType == "consensus" {
-		mn.RegisterStreamHandler(TransactionsRequestProtocol, mn.transactionsRequestHandler) // [cite: consensusnode/stream_manager.go]
+		mn.RegisterStreamHandler(TransactionsRequestProtocol, mn.transactionsRequestHandler)
 		log.Printf("Đã đăng ký stream handler cho %s (Loại Node: %s)", TransactionsRequestProtocol, mn.config.NodeType)
+
+		mn.RegisterStreamHandler(SyncRequestProtocol, mn.syncRequestHandler) // THIS LINE
+		log.Printf("Đã đăng ký stream handler cho %s (Loại Node: %s)", SyncRequestProtocol, mn.config.NodeType)
 	}
 
 	mn.displayNodeInfo() // [cite: consensusnode/utils.go]
@@ -612,9 +615,12 @@ func (mn *ManagedNode) consensusLoop() {
 				// }
 				// Nếu đã chọn partner ở trên và muốn đồng bộ ngay:
 				if partnerErr == nil && partnerPeerID != "" {
-					log.Printf("CONSENSUS_LOOP: Bước tiếp theo (chưa triển khai): Yêu cầu đồng bộ với partner %s (PeerID: %s)...", partnerNodeID, partnerPeerID)
-					// Ví dụ: go mn.requestSyncWithPeer(mn.ctx, partnerPeerID, string(partnerNodeID))
+					// Gọi hàm requestSyncWithPeer một cách đồng bộ
+					log.Printf("CONSENSUS_LOOP: Initiating synchronous sync with partner %s (PeerID: %s)...", partnerNodeID, partnerPeerID)
+					mn.requestSyncWithPeer(mn.ctx, partnerPeerID, string(partnerNodeID))
+					log.Printf("CONSENSUS_LOOP: Synchronous sync with partner %s (PeerID: %s) completed.", partnerNodeID, partnerPeerID)
 				}
+
 			}
 		endOfConsensusRound:
 			log.Println("--- Kết thúc vòng đồng thuận ---")
@@ -693,3 +699,71 @@ func min(a, b int) int {
 // shouldReconnect, cancelAllReconnects, PublishMessage cần được định nghĩa ở nơi khác trong package consensusnode.
 // Đảm bảo rằng tất cả các package được import (ví dụ "github.com/blockchain/consensus/dag")
 // được định đường dẫn chính xác và có thể truy cập trong cấu trúc dự án của bạn.
+
+// requestSyncWithPeer initiates a synchronization process with a specific peer.
+func (mn *ManagedNode) requestSyncWithPeer(ctx context.Context, partnerPeerID peer.ID, partnerNodeID string) {
+	log.Printf("CONSENSUS_LOOP: Attempting to initiate sync with partner %s (PeerID: %s)", partnerNodeID, partnerPeerID)
+
+	// 1. Prepare the sync request payload.
+	// This payload could indicate the current state of this node's DAG,
+	// for example, the hash of its latest event, its current frame, etc.
+	// The specific content depends on your synchronization strategy.
+	// For this example, let's send a simple message.
+	// You might want to include your own NodeID/PubKeyHex so the partner knows who is requesting.
+	ownPubKeyHex, err := mn.getOwnPublicKeyHex()
+	if err != nil {
+		log.Printf("CONSENSUS_LOOP: Error getting own public key for sync request to %s: %v", partnerPeerID, err)
+		return
+	}
+
+	// Example payload: could be JSON, Borsh, etc.
+	// Let's assume we want to tell the partner our latest event ID.
+	latestSelfEventID, selfEventExists := mn.dagStore.GetLatestEventIDByCreatorPubKeyHex(ownPubKeyHex) //
+	var selfLatestEventIDStr string
+	if selfEventExists {
+		selfLatestEventIDStr = latestSelfEventID.String()
+	}
+
+	requestPayload := []byte(fmt.Sprintf("{\"action\": \"request_sync\", \"requester_node_id\": \"%s\", \"latest_event_id\": \"%s\", \"timestamp\": %d}",
+		ownPubKeyHex, selfLatestEventIDStr, time.Now().Unix()))
+
+	// 2. Send the request using mn.SendRequest (from stream_manager.go)
+	// Use a timeout for the request.
+	reqCtx, cancelReq := context.WithTimeout(ctx, 30*time.Second) // Adjust timeout as needed
+	defer cancelReq()
+
+	log.Printf("CONSENSUS_LOOP: Sending SyncRequestProtocol to %s (Payload: %s)", partnerPeerID, string(requestPayload))
+	responseData, err := mn.SendRequest(reqCtx, partnerPeerID, SyncRequestProtocol, requestPayload) //
+
+	if err != nil {
+		log.Printf("CONSENSUS_LOOP: Error sending sync request to partner %s (PeerID: %s): %v", partnerNodeID, partnerPeerID, err)
+		return
+	}
+
+	// 3. Process the responseData.
+	// The responseData would contain the information needed to sync up,
+	// e.g., missing events, a list of event hashes, etc.
+	log.Printf("CONSENSUS_LOOP: Received sync response from partner %s (PeerID: %s): %s", partnerNodeID, partnerPeerID, string(responseData))
+
+	// TODO: Implement logic to parse responseData and update the local DAG (mn.dagStore)
+	// This might involve:
+	// - Unmarshalling events sent by the partner.
+	// - Adding valid events to mn.dagStore.AddEvent(event).
+	// - Handling potential conflicts or forks if your protocol supports it.
+	// Example:
+	// var syncResponse SomeSyncResponseType
+	// if err := json.Unmarshal(responseData, &syncResponse); err != nil {
+	//     log.Printf("CONSENSUS_LOOP: Error unmarshalling sync response from %s: %v", partnerPeerID, err)
+	//     return
+	// }
+	// for _, eventBytes := range syncResponse.MissingEvents {
+	//     event, err := dag.Unmarshal(eventBytes) //
+	//     if err != nil {
+	//         // handle error
+	//         continue
+	//     }
+	//     if err := mn.dagStore.AddEvent(event); err != nil { //
+	//         // handle error
+	//     }
+	// }
+}
