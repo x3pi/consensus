@@ -11,7 +11,7 @@ import (
 
 	// Đảm bảo đường dẫn import này là chính xác cho dự án của bạn
 	"github.com/blockchain/consensus/consensusnode" // Giả sử đây là đường dẫn module của bạn
-	"github.com/libp2p/go-libp2p/core/peer"         // Thêm import này
+	// Thêm import này
 	"gopkg.in/yaml.v3"
 )
 
@@ -125,27 +125,27 @@ func main() {
 		log.Fatalf("Không thể khởi động ManagedNode: %v", err)
 	}
 
-	isMasterItself := false
-	if cfg.MasterNodeAddress != "" {
-		// Phân tích AddrInfoFromString cần peer.ID, nên cần import "github.com/libp2p/go-libp2p/core/peer"
-		masterAddrInfo, err := peer.AddrInfoFromString(cfg.MasterNodeAddress)
-		if err != nil {
-			log.Printf("Cảnh báo: Không thể phân tích MasterNodeAddress '%s': %v", cfg.MasterNodeAddress, err)
-		} else if masterAddrInfo != nil && node.Host().ID() == masterAddrInfo.ID {
-			isMasterItself = true
-		}
-	}
+	// isMasterItself := false
+	// if cfg.MasterNodeAddress != "" {
+	// 	// Phân tích AddrInfoFromString cần peer.ID, nên cần import "github.com/libp2p/go-libp2p/core/peer"
+	// 	masterAddrInfo, err := peer.AddrInfoFromString(cfg.MasterNodeAddress)
+	// 	if err != nil {
+	// 		log.Printf("Cảnh báo: Không thể phân tích MasterNodeAddress '%s': %v", cfg.MasterNodeAddress, err)
+	// 	} else if masterAddrInfo != nil && node.Host().ID() == masterAddrInfo.ID {
+	// 		isMasterItself = true
+	// 	}
+	// }
 
-	if cfg.MasterNodeAddress != "" && !isMasterItself {
-		log.Printf("Node này (ID: %s, Type: %s) sẽ hoạt động như một client và gửi yêu cầu định kỳ đến Master Node tại %s.", node.Host().ID(), cfg.NodeType, cfg.MasterNodeAddress)
-		// Chạy việc gửi request trong một goroutine để không block hàm main
-		// Truyền node.Context() (chính là nodeCtx đã tạo ở trên) vào hàm
-		go sendTransactionRequestPeriodically(node.Context(), node)
-	} else if cfg.MasterNodeAddress == "" {
-		log.Printf("Node này (ID: %s, Type: %s) không có MasterNodeAddress được cấu hình, sẽ không gửi yêu cầu TransactionsRequestProtocol tự động.", node.Host().ID(), cfg.NodeType)
-	} else if isMasterItself {
-		log.Printf("Node này (ID: %s, Type: %s) là Master Node được cấu hình, sẽ không gửi yêu cầu TransactionsRequestProtocol cho chính nó.", node.Host().ID(), cfg.NodeType)
-	}
+	// if cfg.MasterNodeAddress != "" && !isMasterItself {
+	// 	log.Printf("Node này (ID: %s, Type: %s) sẽ hoạt động như một client và gửi yêu cầu định kỳ đến Master Node tại %s.", node.Host().ID(), cfg.NodeType, cfg.MasterNodeAddress)
+	// 	// Chạy việc gửi request trong một goroutine để không block hàm main
+	// 	// Truyền node.Context() (chính là nodeCtx đã tạo ở trên) vào hàm
+	// 	go sendTransactionRequestPeriodically(node.Context(), node)
+	// } else if cfg.MasterNodeAddress == "" {
+	// 	log.Printf("Node này (ID: %s, Type: %s) không có MasterNodeAddress được cấu hình, sẽ không gửi yêu cầu TransactionsRequestProtocol tự động.", node.Host().ID(), cfg.NodeType)
+	// } else if isMasterItself {
+	// 	log.Printf("Node này (ID: %s, Type: %s) là Master Node được cấu hình, sẽ không gửi yêu cầu TransactionsRequestProtocol cho chính nó.", node.Host().ID(), cfg.NodeType)
+	// }
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
