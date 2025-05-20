@@ -7,8 +7,8 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time" // Thêm package time
 
+	// Thêm package time
 	// Đảm bảo đường dẫn import này là chính xác cho dự án của bạn
 	"github.com/blockchain/consensus/consensusnode" // Giả sử đây là đường dẫn module của bạn
 	// Thêm import này
@@ -39,52 +39,52 @@ func loadConfigFromFile(path string, cfg *consensusnode.NodeConfig) error {
 
 // sendTransactionRequest định kỳ gửi yêu cầu TransactionsRequestProtocol đến master node.
 // Hàm này sẽ chạy cho đến khi `appCtx` bị hủy.
-func sendTransactionRequestPeriodically(appCtx context.Context, node *consensusnode.ManagedNode) {
-	// Đợi một chút để node có thời gian kết nối hoặc ổn định (tùy chọn)
-	// trước khi bắt đầu vòng lặp gửi request.
-	select {
-	case <-time.After(10 * time.Second): // Đợi 10 giây
-		log.Println("CLIENT: Bắt đầu gửi yêu cầu TransactionsRequestProtocol định kỳ...")
-	case <-appCtx.Done():
-		log.Println("CLIENT: Context ứng dụng đã hủy trước khi bắt đầu gửi yêu cầu định kỳ.")
-		return
-	}
+// func sendTransactionRequestPeriodically(appCtx context.Context, node *consensusnode.ManagedNode) {
+// 	// Đợi một chút để node có thời gian kết nối hoặc ổn định (tùy chọn)
+// 	// trước khi bắt đầu vòng lặp gửi request.
+// 	select {
+// 	case <-time.After(10 * time.Second): // Đợi 10 giây
+// 		log.Println("CLIENT: Bắt đầu gửi yêu cầu TransactionsRequestProtocol định kỳ...")
+// 	case <-appCtx.Done():
+// 		log.Println("CLIENT: Context ứng dụng đã hủy trước khi bắt đầu gửi yêu cầu định kỳ.")
+// 		return
+// 	}
 
-	// Tạo một ticker để kích hoạt việc gửi request mỗi 30 giây
-	ticker := time.NewTicker(60 * time.Second)
-	defer ticker.Stop() // Đảm bảo ticker được dừng khi hàm kết thúc
+// 	// Tạo một ticker để kích hoạt việc gửi request mỗi 30 giây
+// 	ticker := time.NewTicker(60 * time.Second)
+// 	defer ticker.Stop() // Đảm bảo ticker được dừng khi hàm kết thúc
 
-	for {
-		select {
-		case <-appCtx.Done(): // Nếu context của ứng dụng bị hủy (ví dụ: node đang dừng)
-			log.Println("CLIENT: Dừng gửi yêu cầu định kỳ do context ứng dụng đã hủy.")
-			return
-		case t := <-ticker.C: // Khi ticker kích hoạt
-			log.Printf("CLIENT: Ticker kích hoạt lúc %v, chuẩn bị gửi yêu cầu...", t)
+// 	for {
+// 		select {
+// 		case <-appCtx.Done(): // Nếu context của ứng dụng bị hủy (ví dụ: node đang dừng)
+// 			log.Println("CLIENT: Dừng gửi yêu cầu định kỳ do context ứng dụng đã hủy.")
+// 			return
+// 		case t := <-ticker.C: // Khi ticker kích hoạt
+// 			log.Printf("CLIENT: Ticker kích hoạt lúc %v, chuẩn bị gửi yêu cầu...", t)
 
-			// Chuẩn bị dữ liệu bạn muốn gửi.
-			// Bạn có thể thay đổi payload mỗi lần gửi nếu cần.
-			requestPayload := []byte(fmt.Sprintf("{\"action\": \"get_pending_transactions\", \"timestamp\": %d, \"request_id\": \"client_periodic_%d\"}", time.Now().Unix(), time.Now().Nanosecond()))
+// 			// Chuẩn bị dữ liệu bạn muốn gửi.
+// 			// Bạn có thể thay đổi payload mỗi lần gửi nếu cần.
+// 			requestPayload := []byte(fmt.Sprintf("{\"action\": \"get_pending_transactions\", \"timestamp\": %d, \"request_id\": \"client_periodic_%d\"}", time.Now().Unix(), time.Now().Nanosecond()))
 
-			// Lấy context cho request này, có thể với timeout ngắn hơn.
-			// Sử dụng appCtx làm parent để request cũng bị hủy nếu node dừng.
-			reqCtx, cancelReq := context.WithTimeout(appCtx, 20*time.Second) // Timeout 20 giây cho mỗi request
+// 			// Lấy context cho request này, có thể với timeout ngắn hơn.
+// 			// Sử dụng appCtx làm parent để request cũng bị hủy nếu node dừng.
+// 			reqCtx, cancelReq := context.WithTimeout(appCtx, 20*time.Second) // Timeout 20 giây cho mỗi request
 
-			log.Printf("CLIENT: Đang gửi TransactionsRequestProtocol tới Master Node (Payload: %s)...", string(requestPayload))
-			responseData, err := node.SendRequestToMasterNode(reqCtx, consensusnode.TransactionsRequestProtocol, requestPayload)
-			cancelReq() // Hủy context của request sau khi hoàn tất hoặc lỗi
+// 			log.Printf("CLIENT: Đang gửi TransactionsRequestProtocol tới Master Node (Payload: %s)...", string(requestPayload))
+// 			responseData, err := node.SendRequestToMasterNode(reqCtx, consensusnode.TransactionsRequestProtocol, requestPayload)
+// 			cancelReq() // Hủy context của request sau khi hoàn tất hoặc lỗi
 
-			if err != nil {
-				log.Printf("CLIENT: Lỗi khi gửi TransactionsRequestProtocol đến Master Node: %v", err)
-				// Tiếp tục vòng lặp để thử lại ở lần ticker tiếp theo
-				continue
-			}
+// 			if err != nil {
+// 				log.Printf("CLIENT: Lỗi khi gửi TransactionsRequestProtocol đến Master Node: %v", err)
+// 				// Tiếp tục vòng lặp để thử lại ở lần ticker tiếp theo
+// 				continue
+// 			}
 
-			log.Printf("CLIENT: Đã nhận phản hồi từ Master Node: %s", string(responseData))
-			// Xử lý responseData nếu cần
-		}
-	}
-}
+// 			log.Printf("CLIENT: Đã nhận phản hồi từ Master Node: %s", string(responseData))
+// 			// Xử lý responseData nếu cần
+// 		}
+// 	}
+// }
 
 func main() {
 	// Sử dụng node.Context() cho sendTransactionRequestPeriodically

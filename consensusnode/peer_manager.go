@@ -2,6 +2,7 @@ package consensusnode
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
@@ -10,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blockchain/consensus/logger"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/peerstore"
@@ -58,29 +60,53 @@ type ManagedPeerInfo struct {
 // --- Quản lý Peer ---
 
 // AddKnownPeer thêm một peer vào danh sách quản lý một cách tường minh, thường trước khi thử kết nối.
+// AddKnownPeer thêm một peer vào danh sách quản lý một cách tường minh, thường trước khi thử kết nối.
+// Hàm này cũng sẽ cố gắng trích xuất và lưu trữ PubKeyHex của peer vào mn.connectedPeerPubKeys.
 func (mn *ManagedNode) AddKnownPeer(peerAddrStr string, peerType string) error {
-	addr, err := peer.AddrInfoFromString(peerAddrStr)
+	addrInfo, err := peer.AddrInfoFromString(peerAddrStr)
 	if err != nil {
 		return fmt.Errorf("địa chỉ peer không hợp lệ %s: %w", peerAddrStr, err)
+	}
+
+	// Trích xuất và lưu trữ PubKeyHex nếu có thể
+	if addrInfo.ID != "" { // Đảm bảo peer.ID tồn tại
+		pubKey, pkErr := addrInfo.ID.ExtractPublicKey()
+		if pkErr == nil && pubKey != nil {
+			rawPubKey, rawErr := pubKey.Raw()
+			if rawErr == nil {
+				pubKeyHex := hex.EncodeToString(rawPubKey)
+				mn.peerPubKeyMutex.Lock()
+				mn.connectedPeerPubKeys[addrInfo.ID] = pubKeyHex
+				mn.peerPubKeyMutex.Unlock()
+				log.Printf("AddKnownPeer: Đã thêm/cập nhật PubKeyHex cho PeerID %s", addrInfo.ID)
+			} else {
+				log.Printf("AddKnownPeer: Lỗi khi lấy raw bytes từ PublicKey cho PeerID %s: %v", addrInfo.ID, rawErr)
+			}
+		} else {
+			log.Printf("AddKnownPeer: Không thể trích xuất PublicKey từ PeerID %s (địa chỉ: %s): %v", addrInfo.ID, peerAddrStr, pkErr)
+		}
+	} else {
+		log.Printf("AddKnownPeer: PeerID rỗng từ địa chỉ %s, không thể trích xuất public key.", peerAddrStr)
 	}
 
 	mn.peerMutex.Lock()
 	defer mn.peerMutex.Unlock()
 
-	if pInfo, exists := mn.peers[addr.ID]; exists {
+	if pInfo, exists := mn.peers[addrInfo.ID]; exists {
 		// Peer đã tồn tại, cập nhật thông tin nếu cần (ví dụ: loại, địa chỉ)
-		pInfo.Type = peerType
+		pInfo.Type = peerType // Cập nhật Type
 		// Logic để hợp nhất địa chỉ hoặc thay thế bằng địa chỉ mới nhất
-		pInfo.Addresses = []peer.AddrInfo{*addr} // Đơn giản là thay thế
-		log.Printf("Đã cập nhật thông tin cho peer đã biết %s (Loại: %s, Địa chỉ: %s)", addr.ID, peerType, addr.Addrs)
+		pInfo.Addresses = []peer.AddrInfo{*addrInfo} // Đơn giản là thay thế địa chỉ
+		log.Printf("Đã cập nhật thông tin cho peer đã biết %s (Loại: %s, Địa chỉ: %s)", addrInfo.ID, peerType, addrInfo.Addrs)
 	} else {
-		mn.peers[addr.ID] = &ManagedPeerInfo{
-			ID:        addr.ID,
-			Addresses: []peer.AddrInfo{*addr},
+		// Peer chưa tồn tại, tạo mới
+		mn.peers[addrInfo.ID] = &ManagedPeerInfo{
+			ID:        addrInfo.ID,
+			Addresses: []peer.AddrInfo{*addrInfo},
 			Type:      peerType,
 			Status:    PeerDisconnected, // Trạng thái ban đầu
 		}
-		log.Printf("Đã thêm peer đã biết %s (Loại: %s, Địa chỉ: %s)", addr.ID, peerType, addr.Addrs)
+		log.Printf("Đã thêm peer đã biết %s (Loại: %s, Địa chỉ: %s)", addrInfo.ID, peerType, addrInfo.Addrs)
 	}
 	return nil
 }
@@ -107,12 +133,14 @@ func (mn *ManagedNode) connectToBootstrapPeers() error {
 		connectWg.Add(1)
 		go func(addrInfo peer.AddrInfo) {
 			defer connectWg.Done()
+			logger.Error("connectToBootstrapPeers: ", addrInfo)
 			if err := mn.ConnectToPeer(addrInfo, "bootstrap"); err != nil { // Mặc định loại là "bootstrap"
 				log.Printf("Không thể kết nối tới bootstrap peer %s: %v", addrInfo.ID, err)
 			}
 		}(*addr)
 	}
 	connectWg.Wait()
+	logger.Info(mn.peers)
 	log.Println("Hoàn tất quá trình kết nối bootstrap peer.")
 	return nil
 }
@@ -124,18 +152,46 @@ func (mn *ManagedNode) ConnectToPeer(peerInfo peer.AddrInfo, peerType string) er
 		return nil
 	}
 
+	// Trích xuất và lưu trữ PubKeyHex nếu có thể, trước khi lock mn.peerMutex
+	// setupConnectionNotifier sẽ làm điều này một lần nữa khi kết nối thành công,
+	// việc này đảm bảo pubkey có sẵn sớm hơn.
+	if peerInfo.ID != "" { // Đảm bảo peer.ID tồn tại
+		pubKey, pkErr := peerInfo.ID.ExtractPublicKey()
+		if pkErr == nil && pubKey != nil {
+			rawPubKey, rawErr := pubKey.Raw()
+			if rawErr == nil {
+				pubKeyHex := hex.EncodeToString(rawPubKey)
+				mn.peerPubKeyMutex.Lock()
+				mn.connectedPeerPubKeys[peerInfo.ID] = pubKeyHex
+				mn.peerPubKeyMutex.Unlock()
+				log.Printf("ConnectToPeer: Đã thêm/cập nhật PubKeyHex cho PeerID %s trước khi kết nối", peerInfo.ID)
+			} else {
+				log.Printf("ConnectToPeer: Lỗi khi lấy raw bytes từ PublicKey cho PeerID %s: %v", peerInfo.ID, rawErr)
+			}
+		} else {
+			log.Printf("ConnectToPeer: Không thể trích xuất PublicKey từ PeerID %s: %v", peerInfo.ID, pkErr)
+		}
+	} else if len(peerInfo.Addrs) > 0 {
+		log.Printf("ConnectToPeer: PeerID rỗng trong peerInfo cho địa chỉ %s, không thể trích xuất public key trước.", peerInfo.Addrs[0])
+	} else {
+		log.Printf("ConnectToPeer: PeerID rỗng và không có địa chỉ trong peerInfo, không thể trích xuất public key trước.")
+	}
+
 	mn.peerMutex.Lock()
 	if p, exists := mn.peers[peerInfo.ID]; exists {
 		if p.Status == PeerConnecting || p.Status == PeerConnected {
 			mn.peerMutex.Unlock()
 			// log.Printf("Đã kết nối hoặc đang kết nối tới peer %s", peerInfo.ID)
-			return nil
+			return nil // Đã có kết nối hoặc đang trong quá trình kết nối
 		}
-		p.Type = peerType
-		p.Addresses = []peer.AddrInfo{peerInfo}
+		// Nếu peer đã tồn tại nhưng không ở trạng thái Connecting/Connected, cập nhật thông tin
+		p.Type = peerType                       // Cập nhật Type
+		p.Addresses = []peer.AddrInfo{peerInfo} // Cập nhật địa chỉ
 		p.Status = PeerConnecting
-		p.ReconnectAttempts = 0
+		p.LastError = nil       // Xóa lỗi cũ khi thử kết nối lại
+		p.ReconnectAttempts = 0 // Reset số lần thử lại
 	} else {
+		// Peer chưa tồn tại, tạo mới
 		mn.peers[peerInfo.ID] = &ManagedPeerInfo{
 			ID:        peerInfo.ID,
 			Addresses: []peer.AddrInfo{peerInfo},
@@ -143,20 +199,31 @@ func (mn *ManagedNode) ConnectToPeer(peerInfo peer.AddrInfo, peerType string) er
 			Status:    PeerConnecting,
 		}
 	}
+	currentPeerInfo := mn.peers[peerInfo.ID] // Lấy thông tin peer vừa cập nhật/tạo
 	mn.peerMutex.Unlock()
 
-	log.Printf("Đang thử kết nối tới peer %s (Loại: %s, Địa chỉ: %s)", peerInfo.ID, peerType, peerInfo.Addrs)
+	log.Printf("Đang thử kết nối tới peer %s (Loại: %s, Địa chỉ: %s)", currentPeerInfo.ID, currentPeerInfo.Type, currentPeerInfo.Addresses[0].Addrs)
+	// Thêm tất cả các địa chỉ đã biết của peer vào peerstore
+	// peerstore.PermanentAddrTTL đảm bảo địa chỉ không bị xóa sớm
 	mn.host.Peerstore().AddAddrs(peerInfo.ID, peerInfo.Addrs, peerstore.PermanentAddrTTL)
 
-	err := mn.host.Connect(mn.ctx, peerInfo)
+	// Sử dụng context của node cho việc kết nối
+	// Có thể tạo một context con với timeout nếu muốn kiểm soát thời gian kết nối
+	connectCtx, cancel := context.WithTimeout(mn.ctx, mn.config.PingTimeout*2) // Ví dụ: timeout gấp đôi PingTimeout
+	defer cancel()
+
+	err := mn.host.Connect(connectCtx, peerInfo) // Sử dụng peerInfo đầy đủ
 	if err != nil {
-		// "" cho peerType vì updatePeerStatus sẽ lấy từ map
-		mn.updatePeerStatus(peerInfo.ID, PeerFailed, err, "")
+		// Cập nhật trạng thái thất bại. peerType được lấy từ currentPeerInfo.Type đã thiết lập ở trên.
+		mn.updatePeerStatus(peerInfo.ID, PeerFailed, err, currentPeerInfo.Type)
 		log.Printf("Không thể kết nối tới peer %s: %v", peerInfo.ID, err)
-		mn.tryReconnectToPeer(peerInfo.ID, peerType)
-		return err
+		// Thử kết nối lại nếu cần thiết
+		mn.tryReconnectToPeer(peerInfo.ID, currentPeerInfo.Type)
+		return fmt.Errorf("không thể kết nối tới peer %s: %w", peerInfo.ID, err)
 	}
-	// Trạng thái sẽ được cập nhật thành PeerConnected bởi connection notifier
+	// Nếu không có lỗi, yêu cầu kết nối đã được gửi.
+	// Trạng thái sẽ được cập nhật thành PeerConnected bởi connection notifier (ConnectedF).
+	// Không cần gọi updatePeerStatus( PeerConnected ) ở đây.
 	log.Printf("Yêu cầu kết nối tới peer %s đã được gửi.", peerInfo.ID)
 	return nil
 }

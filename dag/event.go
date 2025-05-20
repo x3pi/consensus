@@ -3,6 +3,7 @@ package dag
 import (
 	"bytes"
 	"fmt"
+	"log" // Thêm import log để ghi lại lỗi tiềm ẩn từ event.Hash()
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -81,9 +82,15 @@ func NewEvent(data EventData, signature []byte) *Event {
 		Vote:         make(map[EventID]bool), // Khởi tạo map Vote
 		ClothoStatus: ClothoUndecided,        // Khởi tạo trạng thái là Undecided
 		Candidate:    false,                  // Mặc định không phải ứng viên
+		// mu và cachedHash sẽ có giá trị zero mặc định của chúng
 	}
 	// Tính toán và cache hash ngay khi tạo
-	_, _ = event.Hash() // Bỏ qua lỗi cho đơn giản, nên xử lý trong thực tế
+	_, err := event.Hash()
+	if err != nil {
+		// Trong thực tế, bạn có thể muốn xử lý lỗi này nghiêm túc hơn,
+		// ví dụ: trả về lỗi từ NewEvent hoặc panic nếu hash là thiết yếu ngay lúc tạo.
+		log.Printf("Warning: Lỗi khi tính hash trong NewEvent: %v", err)
+	}
 	return event
 }
 
@@ -126,36 +133,73 @@ func (e *Event) GetEventId() EventID {
 	if cached != nil {
 		return EventID(*cached)
 	}
-	hash, _ := e.Hash() // Bỏ qua lỗi cho đơn giản
+	// Nếu hash chưa được cache, tính toán nó.
+	// Trong NewEvent và Unmarshal, Hash() được gọi, nên trường hợp này ít khi xảy ra trừ khi có lỗi trước đó.
+	hash, err := e.Hash()
+	if err != nil {
+		log.Printf("Warning: Lỗi khi gọi Hash() bên trong GetEventId(): %v. Trả về EventID rỗng.", err)
+		return EventID{} // Trả về EventID rỗng nếu có lỗi
+	}
 	return hash
 }
 
 // Marshal tuần tự hóa toàn bộ Event (EventData và Signature) thành dạng byte sử dụng Borsh.
 func (e *Event) Marshal() ([]byte, error) {
-	// Chỉ EventData và Signature được tuần tự hóa theo tag borsh.
-	// Các trường skip (cachedHash, Vote, Candidate, ClothoStatus, mu) sẽ không được tuần tự hóa.
-	return borsh.Serialize(e)
+	// Định nghĩa một struct tạm thời chỉ chứa các trường cần serialize
+	// để đảm bảo các trường `borsh:"skip"` không ảnh hưởng.
+	type serializableEvent struct {
+		EventData        // Nhúng EventData
+		Signature []byte `borsh:"slice"`
+	}
+	temp := serializableEvent{
+		EventData: e.EventData,
+		Signature: e.Signature,
+	}
+	return borsh.Serialize(temp)
+}
+
+// serializableEventForUnmarshal là một struct tạm thời chỉ chứa các trường
+// mà chúng ta muốn deserialize từ stream dữ liệu.
+// Điều này giúp tránh các vấn đề reflection với các trường không được export
+// hoặc các trường phức tạp được đánh dấu `borsh:"skip"` trong struct Event chính.
+type serializableEventForUnmarshal struct {
+	EventData        // Nhúng EventData
+	Signature []byte `borsh:"slice"`
 }
 
 // Unmarshal giải tuần tự hóa bytes thành cấu trúc Event sử dụng Borsh.
-// Sau khi giải tuần tự hóa, nó sẽ tính toán và cache hash của EventData.
-// Các trường không được tuần tự hóa sẽ được khởi tạo giá trị mặc định.
+// Nó sử dụng một struct tạm thời để deserialize các trường cốt lõi,
+// sau đó khởi tạo các trường còn lại của Event.
 func Unmarshal(data []byte) (*Event, error) {
-	var event Event
-	err := borsh.Deserialize(&event, data)
+	var temp serializableEventForUnmarshal
+	err := borsh.Deserialize(&temp, data)
 	if err != nil {
-		return nil, fmt.Errorf("failed to deserialize event: %w", err)
+		return nil, fmt.Errorf("failed to deserialize event core data: %w", err)
 	}
 
-	// Khởi tạo các trường không tuần tự hóa sau khi deserialize
-	event.Vote = make(map[EventID]bool)
-	event.ClothoStatus = ClothoUndecided
-	event.Candidate = false
-	// event.mu đã là zero value (Mutex)
+	// Tạo struct Event hoàn chỉnh và điền dữ liệu từ struct tạm thời
+	event := &Event{
+		EventData:    temp.EventData,
+		Signature:    temp.Signature,
+		Vote:         make(map[EventID]bool), // Khởi tạo map Vote
+		ClothoStatus: ClothoUndecided,        // Khởi tạo trạng thái là Undecided
+		Candidate:    false,                  // Mặc định không phải ứng viên
+		// mu (sync.Mutex) sẽ được khởi tạo với giá trị zero của nó.
+		// cachedHash (atomic.Pointer) cũng sẽ được khởi tạo với giá trị zero (nil).
+	}
 
-	// Tính toán và cache hash sau khi deserialize
-	_, _ = event.Hash() // Bỏ qua lỗi
-	return &event, nil
+	// Tính toán và cache hash sau khi deserialize và khởi tạo Event
+	// Quan trọng: Hash() cần được gọi trên event đã được cấu trúc hoàn chỉnh (nếu logic hash phụ thuộc vào nó)
+	// nhưng ở đây Hash() chỉ dựa trên EventData, nên thứ tự này là ổn.
+	_, err = event.Hash()
+	if err != nil {
+		// Ghi log lỗi này vì nó có thể quan trọng cho việc debug sau này
+		log.Printf("Warning: Lỗi khi tính toán hash sau khi Unmarshal event: %v", err)
+		// Tùy thuộc vào yêu cầu, bạn có thể muốn trả về lỗi ở đây nếu hash là bắt buộc
+		// return nil, fmt.Errorf("failed to calculate hash after unmarshalling event: %w", err)
+	}
+
+	return event, nil
 }
 
 // ToEventID là hàm helper để chuyển đổi common.Hash thành EventID.

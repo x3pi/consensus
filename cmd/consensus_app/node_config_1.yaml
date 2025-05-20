@@ -13,13 +13,14 @@ privateKey: "CAESQLR7tZEOOzOcdWKweJopyAH5BurtqIkvIL0HnbMtnJPTXQyyuZxwJMdogoXl6tx
 bootstrapPeers:
   - "/ip4/127.0.0.1/udp/8001/quic-v1/p2p/12D3KooWQ5i8sRfvdhkKaPu4aGQ8sRJCAYyRENf16ZydxM9boAEY"
   - "/ip4/127.0.0.1/udp/8003/quic-v1/p2p/12D3KooWEBSxQRsY3akf5gMKZsmiY7zthkV8LSk7PdP4YSXJTiXA"
+  
 masterNodeAddress: "/ip4/127.0.0.1/tcp/9001/p2p/12D3KooWJ2s3WiamQxiHK43yU3fsTHrgMLNteW1Hr5RpqcKdZUzu"
 # Loại của node này (ví dụ: "master", "sub", "validator", "light-client").
 # Logic ứng dụng của bạn có thể dựa vào giá trị này.
 nodeType: "consensus"
 
 # Đường dẫn đến thư mục gốc nơi node có thể lưu trữ dữ liệu (ví dụ: database, logs).
-rootPath: "./node_data_validator_1"
+rootPath: "./node_data_2"
 
 # Kích thước buffer cho kênh transaction (nếu ứng dụng của bạn sử dụng).
 transactionChanBuffer: 2000
@@ -41,9 +42,9 @@ maxMessageSize: 10485760 # Kích thước message tối đa cho PubSub (tính b�
 keyValueCacheSize: 2000   # Số lượng mục tối đa trong cache.
 
 # (Tùy chọn) Danh sách các protocol ID mà node này hỗ trợ (ngoài các protocol mặc định của libp2p).
-# supportedProtocols:
-#   - "/my-custom-protocol/1.0"
-#   - "/another-app-protocol/0.1"
+supportedProtocols:
+  - "/meta-node/transactions-request/1.0.0" # Protocol cho yêu cầu giao dịch
+  - "/meta-node/sync-request/1.0.0"         # Protocol cho yêu cầu đồng bộ hóa (ĐÃ THÊM)
 
 initialStake: 10
 
