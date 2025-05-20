@@ -409,20 +409,21 @@ func (ds *DagStore) PruneOldEvents(oldestFrameToKeep uint64) {
 
 	logger.Info(fmt.Sprintf("PruneOldEvents: Bắt đầu dọn dẹp các event thuộc frame cũ hơn %d. lastDecidedFrame hiện tại: %d", oldestFrameToKeep, ds.lastDecidedFrame))
 
-	if oldestFrameToKeep == 0 { // Không cho phép xóa frame 0 nếu frame 0 có ý nghĩa đặc biệt
-		logger.Warn("PruneOldEvents: oldestFrameToKeep là 0, không thực hiện dọn dẹp để tránh xóa frame gốc.")
+	if oldestFrameToKeep == 0 { // Không cho phép xóa frame 0 nếu frame 0 có ý nghĩa đặc biệt hoặc frame bắt đầu từ 1
+		logger.Warn("PruneOldEvents: oldestFrameToKeep là 0, không thực hiện dọn dẹp.")
 		return
 	}
 
-	// Điều kiện an toàn: Chỉ cho phép pruning nếu oldestFrameToKeep thực sự cũ hơn hoặc bằng frame đã quyết định gần nhất.
-	// Hoặc, bạn có thể muốn một khoảng cách an toàn, ví dụ: oldestFrameToKeep <= ds.lastDecidedFrame - K
-	// Hiện tại, chúng ta cho phép pruning đến (nhưng không bao gồm) oldestFrameToKeep,
-	// và oldestFrameToKeep phải nhỏ hơn hoặc bằng lastDecidedFrame + 1 (nghĩa là có thể xóa tất cả các frame đã quyết định).
-	// Để đơn giản, nếu oldestFrameToKeep > ds.lastDecidedFrame + 1, có nghĩa là đang yêu cầu giữ lại frame chưa được quyết định, điều này không an toàn.
-	// Một cách tiếp cận an toàn là chỉ prune các frame đã được quyết định và cũ hơn một ngưỡng nào đó.
-	// Ví dụ, chỉ prune nếu oldestFrameToKeep <= ds.lastDecidedFrame.
-	if oldestFrameToKeep > ds.lastDecidedFrame+1 { // +1 vì lastDecidedFrame là frame cuối cùng đã quyết định, ta muốn giữ nó lại ít nhất
-		logger.Info(fmt.Sprintf("PruneOldEvents: Chưa thể dọn dẹp đến frame %d vì lastDecidedFrame mới chỉ là %d. Cần đợi thêm frame được quyết định.", oldestFrameToKeep, ds.lastDecidedFrame))
+	// Điều kiện an toàn: Chỉ cho phép pruning nếu oldestFrameToKeep <= ds.lastDecidedFrame.
+	// Điều này đảm bảo rằng frame cuối cùng đã được quyết định (ds.lastDecidedFrame) sẽ không bị xóa,
+	// mà chỉ các frame cũ hơn nó một cách nghiêm ngặt mới được xem xét để xóa.
+	// oldestFrameToKeep là frame CŨ NHẤT mà chúng ta muốn GIỮ LẠI.
+	// Các frame F < oldestFrameToKeep sẽ bị xóa.
+	// Để frame ds.lastDecidedFrame không bị xóa, thì ds.lastDecidedFrame phải >= oldestFrameToKeep.
+	// Hay nói cách khác, oldestFrameToKeep phải <= ds.lastDecidedFrame.
+	// Nếu oldestFrameToKeep > ds.lastDecidedFrame, việc pruning sẽ bị bỏ qua.
+	if oldestFrameToKeep > ds.lastDecidedFrame {
+		logger.Info(fmt.Sprintf("PruneOldEvents: Yêu cầu giữ lại các frame từ %d (oldestFrameToKeep). Frame này lớn hơn frame đã quyết định cuối cùng (%d). Không thực hiện dọn dẹp để đảm bảo an toàn, vì điều này có nghĩa là không có frame nào cũ hơn %d để xóa hoặc frame %d là frame hiện tại/tương lai.", oldestFrameToKeep, ds.lastDecidedFrame, oldestFrameToKeep, oldestFrameToKeep))
 		return
 	}
 
@@ -449,57 +450,88 @@ func (ds *DagStore) PruneOldEvents(oldestFrameToKeep uint64) {
 
 	// 3. Dọn dẹp ds.rootsByFrame
 	// Xóa toàn bộ các entry frame cũ hơn oldestFrameToKeep
+	framesProcessedForRoots := make(map[uint64]bool) // Để tránh log lặp lại cho cùng một frame
 	for frame := range ds.rootsByFrame {
 		if frame < oldestFrameToKeep {
+			if !framesProcessedForRoots[frame] { // Log một lần cho mỗi frame bị xóa khỏi rootsByFrame
+				logger.Debug(fmt.Sprintf("PruneOldEvents: Xóa entry cho frame %d khỏi rootsByFrame.", frame))
+				framesProcessedForRoots[frame] = true
+			}
 			delete(ds.rootsByFrame, frame)
 		} else {
 			// Đối với các frame còn lại, lọc ra các rootID đã bị xóa
 			var validRoots []EventID
+			initialRootCount := len(ds.rootsByFrame[frame])
 			for _, rootID := range ds.rootsByFrame[frame] {
-				if _, deleted := eventsToDelete[rootID]; !deleted {
+				if _, deleted := eventsToDelete[rootID]; !deleted { // Check if the root event itself was deleted
 					validRoots = append(validRoots, rootID)
 				}
 			}
-			if len(validRoots) == 0 && len(ds.rootsByFrame[frame]) > 0 { // Nếu frame từng có root nhưng giờ không còn root nào hợp lệ
+
+			if len(validRoots) < initialRootCount && initialRootCount > 0 { // Log nếu có root bị xóa khỏi frame này
+				logger.Debug(fmt.Sprintf("PruneOldEvents: Đã xóa %d root(s) khỏi frame %d trong rootsByFrame. Còn lại %d root(s).", initialRootCount-len(validRoots), frame, len(validRoots)))
+			}
+
+			if len(validRoots) == 0 && initialRootCount > 0 { // Nếu frame từng có root nhưng giờ không còn root nào hợp lệ
 				delete(ds.rootsByFrame, frame)
-			} else {
+			} else if len(validRoots) > 0 { // Only update if there are valid roots left
 				ds.rootsByFrame[frame] = validRoots
+			} else if initialRootCount == 0 { // Frame này vốn đã rỗng, không cần làm gì
+				// Có thể xóa nếu nó là key rỗng, nhưng để an toàn, chỉ xóa nếu nó có entry và giờ rỗng
+				// delete(ds.rootsByFrame, frame) // Tùy chọn: xóa key nếu giá trị là slice rỗng
 			}
 		}
 	}
 
+	// Hàm helper để cắt ngắn chuỗi hex một cách an toàn
+	min := func(a, b int) int {
+		if a < b {
+			return a
+		}
+		return b
+	}
+
 	// 4. Dọn dẹp ds.latestEvents
-	// Nếu latestEvent của một creator đã bị xóa, cần cập nhật lại nó.
-	// Đây là phần phức tạp hơn nếu muốn tìm lại chính xác latest event mới.
-	// Cách đơn giản: xóa entry nếu latestEvent đã bị prune.
-	for creator, latestID := range ds.latestEvents {
-		if _, deleted := eventsToDelete[latestID]; deleted {
-			delete(ds.latestEvents, creator)
-			logger.Info(fmt.Sprintf("PruneOldEvents: Latest event của creator %s (ID: %s) đã bị xóa, xóa entry khỏi latestEvents.", creator[:6], latestID.String()[:6]))
-			// TODO: Để hoàn thiện hơn, cần duyệt lại các event còn lại của `creator`
-			// để tìm event có index cao nhất và cập nhật lại `ds.latestEvents[creator]`.
-			// Điều này quan trọng để đảm bảo tính đúng đắn của việc tạo event mới (SelfParent).
-			// Ví dụ:
-			// var newLatestEventForCreator *Event = nil
-			// for _, evt := range ds.events { // Duyệt các event còn lại
-			//     if hex.EncodeToString(evt.EventData.Creator) == creator {
-			//         if newLatestEventForCreator == nil || evt.EventData.Index > newLatestEventForCreator.EventData.Index {
-			//             newLatestEventForCreator = evt
-			//         }
-			//     }
-			// }
-			// if newLatestEventForCreator != nil {
-			//     ds.latestEvents[creator] = newLatestEventForCreator.GetEventId()
-			//     logger.Info(fmt.Sprintf("PruneOldEvents: Đã cập nhật latest event cho creator %s thành %s (Index: %d)", creator[:6], newLatestEventForCreator.GetEventId().String()[:6], newLatestEventForCreator.EventData.Index))
-			// }
+	// Nếu latestEvent của một creator đã bị xóa, tìm và cập nhật lại latest event mới nhất của họ từ các event còn lại.
+	creatorsToRecheck := make([]string, 0, len(ds.latestEvents))
+	for creatorKey := range ds.latestEvents {
+		creatorsToRecheck = append(creatorsToRecheck, creatorKey)
+	}
+
+	for _, creatorKey := range creatorsToRecheck {
+		currentLatestID, existsInMap := ds.latestEvents[creatorKey]
+		if !existsInMap {
+			continue
+		}
+
+		if _, wasDeleted := eventsToDelete[currentLatestID]; wasDeleted {
+			logger.Info(fmt.Sprintf("PruneOldEvents: Latest event %s của creator %s đã bị xóa. Tìm kiếm latest event mới...", currentLatestID.String()[:6], creatorKey[:min(6, len(creatorKey))]))
+
+			delete(ds.latestEvents, creatorKey)
+
+			var newLatestEventForCreator *Event = nil
+			for _, event := range ds.events { // ds.events giờ chỉ chứa các event không bị prune
+				if hex.EncodeToString(event.EventData.Creator) == creatorKey {
+					if newLatestEventForCreator == nil || event.EventData.Index > newLatestEventForCreator.EventData.Index {
+						newLatestEventForCreator = event
+					}
+				}
+			}
+
+			if newLatestEventForCreator != nil {
+				ds.latestEvents[creatorKey] = newLatestEventForCreator.GetEventId()
+				logger.Info(fmt.Sprintf("PruneOldEvents: Đã cập nhật latest event cho creator %s thành %s (Index: %d, Frame: %d)",
+					creatorKey[:min(6, len(creatorKey))],
+					newLatestEventForCreator.GetEventId().String()[:6],
+					newLatestEventForCreator.EventData.Index,
+					newLatestEventForCreator.EventData.Frame))
+			} else {
+				logger.Info(fmt.Sprintf("PruneOldEvents: Không tìm thấy event nào còn lại cho creator %s sau khi pruning. Entry trong latestEvents vẫn bị xóa.", creatorKey[:min(6, len(creatorKey))]))
+			}
 		}
 	}
 
-	// Không nên tự ý thay đổi ds.lastDecidedFrame ở đây.
-	// lastDecidedFrame chỉ nên được cập nhật bởi DecideClotho.
-	// Việc pruning chỉ xóa dữ liệu cũ, không làm thay đổi logic quyết định frame.
-
-	logger.Info(fmt.Sprintf("PruneOldEvents: Hoàn tất. Đã xóa %d event. Số event còn lại: %d. Số rootsByFrame còn lại: %d. Số latestEvents còn lại: %d",
+	logger.Info(fmt.Sprintf("PruneOldEvents: Hoàn tất. Đã xóa %d event. Số event còn lại: %d. Số frame trong rootsByFrame: %d. Số entry trong latestEvents: %d",
 		len(eventsToDelete), len(ds.events), len(ds.rootsByFrame), len(ds.latestEvents)))
 }
 

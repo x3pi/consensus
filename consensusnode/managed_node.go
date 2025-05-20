@@ -79,9 +79,9 @@ type ManagedNode struct {
 const (
 	// FRAMES_TO_KEEP_AFTER_FINALIZED xác định số lượng frame gần nhất đã hoàn tất mà chúng ta muốn giữ lại.
 	// Các frame cũ hơn (lastProcessedFinalizedFrame - FRAMES_TO_KEEP_AFTER_FINALIZED) sẽ bị prune.
-	FRAMES_TO_KEEP_AFTER_FINALIZED uint64 = 10 // Ví dụ: giữ lại 10 frame
+	FRAMES_TO_KEEP_AFTER_FINALIZED uint64 = 20 // Tăng từ 10 lên 20 (ví dụ)
 	// MIN_FRAMES_BEFORE_PRUNING là số frame tối thiểu phải được xử lý trước khi bắt đầu pruning.
-	MIN_FRAMES_BEFORE_PRUNING uint64 = FRAMES_TO_KEEP_AFTER_FINALIZED + 5 // Ví dụ: cần ít nhất 15 frame đã xử lý
+	MIN_FRAMES_BEFORE_PRUNING uint64 = FRAMES_TO_KEEP_AFTER_FINALIZED + 5 // Sẽ tự động thành 25
 )
 
 // NewManagedNode tạo và khởi tạo một ManagedNode mới.
@@ -548,17 +548,21 @@ func (mn *ManagedNode) consensusLoop() {
 				log.Printf("CONSENSUS_LOOP: Đã cập nhật lastProcessedFinalizedFrame thành %d", mn.lastProcessedFinalizedFrame)
 
 				// **GỌI PRUNING SAU KHI XỬ LÝ CÁC FRAME HOÀN TẤT**
-				// if mn.lastProcessedFinalizedFrame >= MIN_FRAMES_BEFORE_PRUNING {
-				// 	// oldestFrameToKeep là frame CŨ NHẤT mà chúng ta muốn GIỮ LẠI.
-				// 	// Các frame < oldestFrameToKeep sẽ bị xóa.
-				// 	// Chúng ta muốn giữ lại FRAMES_TO_KEEP_AFTER_FINALIZED frame gần nhất đã được xử lý.
-				// 	oldestFrameToKeep := mn.lastProcessedFinalizedFrame - FRAMES_TO_KEEP_AFTER_FINALIZED + 1
-				// 	if oldestFrameToKeep <= 0 { // Đảm bảo không xóa frame 0 hoặc frame âm
-				// 		oldestFrameToKeep = 1
-				// 	}
-				// 	log.Printf("CONSENSUS_LOOP: Gọi PruneOldEvents với oldestFrameToKeep = %d", oldestFrameToKeep)
-				// 	mn.dagStore.PruneOldEvents(oldestFrameToKeep)
-				// }
+				if mn.lastProcessedFinalizedFrame >= MIN_FRAMES_BEFORE_PRUNING {
+					// oldestFrameToKeep là frame CŨ NHẤT mà chúng ta muốn GIỮ LẠI.
+					// Các frame < oldestFrameToKeep sẽ bị xóa.
+					// Chúng ta muốn giữ lại FRAMES_TO_KEEP_AFTER_FINALIZED frame gần nhất đã được xử lý.
+					oldestFrameToKeep := mn.lastProcessedFinalizedFrame - FRAMES_TO_KEEP_AFTER_FINALIZED + 1
+					if oldestFrameToKeep < 1 { // Đảm bảo không yêu cầu giữ frame < 1 (nếu frame 0 là đặc biệt hoặc không dùng)
+						oldestFrameToKeep = 1 // Giả sử frame bắt đầu từ 1, hoặc frame 0 không bao giờ bị prune.
+					}
+					log.Printf("CONSENSUS_LOOP: Gọi PruneOldEvents với oldestFrameToKeep = %d (lastProcessedFinalizedFrame=%d, FRAMES_TO_KEEP_AFTER_FINALIZED=%d, MIN_FRAMES_BEFORE_PRUNING=%d)",
+						oldestFrameToKeep, mn.lastProcessedFinalizedFrame, FRAMES_TO_KEEP_AFTER_FINALIZED, MIN_FRAMES_BEFORE_PRUNING)
+					mn.dagStore.PruneOldEvents(oldestFrameToKeep) //
+				} else {
+					log.Printf("CONSENSUS_LOOP: Bỏ qua pruning. lastProcessedFinalizedFrame (%d) < MIN_FRAMES_BEFORE_PRUNING (%d)",
+						mn.lastProcessedFinalizedFrame, MIN_FRAMES_BEFORE_PRUNING)
+				}
 			} else {
 				log.Printf("CONSENSUS_LOOP: Không có Root nào mới được hoàn tất (Clotho). Tiến hành tạo event mới và đồng bộ.")
 
