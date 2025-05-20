@@ -2,6 +2,8 @@ package consensusnode
 
 import (
 	"context"
+	"math/rand"
+
 	// "crypto/ecdsa" // Không cần trực tiếp nếu dùng crypto.Secp256k1PrivateKey
 	"encoding/hex"
 	"errors"
@@ -23,6 +25,7 @@ import (
 
 	// Thay thế "github.com/blockchain/consensus/dag" bằng đường dẫn thực tế của bạn
 	"github.com/blockchain/consensus/dag"
+	"github.com/blockchain/consensus/logger"
 )
 
 // YourStorageInterface là một placeholder cho interface storage của bạn.
@@ -322,13 +325,83 @@ func (mn *ManagedNode) GetDagStore() *dag.DagStore {
 	return mn.dagStore
 }
 
-// selectConsensusPartner chọn một node đối tác để đồng bộ và tạo event.
-func (mn *ManagedNode) selectConsensusPartner() (NodeID, peer.ID, error) {
-	currentDagStore := mn.GetDagStore()
-	if currentDagStore == nil {
-		return "", "", errors.New("DagStore is not available in ManagedNode")
-	}
+// // selectConsensusPartner chọn một node đối tác để đồng bộ và tạo event.
+// func (mn *ManagedNode) selectConsensusPartner() (NodeID, peer.ID, error) {
+// 	currentDagStore := mn.GetDagStore()
+// 	if currentDagStore == nil {
+// 		return "", "", errors.New("DagStore is not available in ManagedNode")
+// 	}
 
+// 	ownKeyHex, err := mn.getOwnPublicKeyHex()
+// 	if err != nil {
+// 		return "", "", fmt.Errorf("không thể lấy public key của chính node: %w", err)
+// 	}
+// 	if ownKeyHex == "" { // Kiểm tra quan trọng
+// 		return "", "", errors.New("public key của chính node là rỗng, không thể tiếp tục lựa chọn node")
+// 	}
+
+// 	connectedPeersMap, err := mn.getConnectedPeerPublicKeys()
+// 	if err != nil {
+// 		return "", "", fmt.Errorf("không thể lấy public key của các peer đang kết nối: %w", err)
+// 	}
+// 	logger.Info("connectedPeersMap: ", connectedPeersMap)
+
+// 	if len(connectedPeersMap) == 0 {
+// 		log.Println("Không có peer nào đang kết nối với public key đã biết để chọn làm đối tác.")
+// 		return "", "", errors.New("no connected peers with known public keys for selection")
+// 	}
+
+// 	var candidateNodeIDs []NodeID
+// 	nodeHeights := make(map[NodeID]uint64)
+// 	nodeInDegrees := make(map[NodeID]uint64)
+// 	nodeIDToPeerIDMap := make(map[NodeID]peer.ID)
+
+// 	for pID, peerPubKeyHex := range connectedPeersMap {
+// 		if peerPubKeyHex == ownKeyHex { // Bỏ qua chính mình
+// 			continue
+// 		}
+// 		currentNodeID := GetNodeIDFromString(peerPubKeyHex) // Từ node_selection.go
+
+// 		h, hOk := currentDagStore.GetHeightForNode(peerPubKeyHex)   // Truyền chuỗi hex
+// 		i, iOk := currentDagStore.GetInDegreeForNode(peerPubKeyHex) // Truyền chuỗi hex
+
+// 		if hOk && iOk {
+// 			logger.Info("currentNodeID", currentNodeID)
+// 			candidateNodeIDs = append(candidateNodeIDs, currentNodeID)
+// 			nodeHeights[currentNodeID] = h
+// 			nodeInDegrees[currentNodeID] = i
+// 			nodeIDToPeerIDMap[currentNodeID] = pID
+// 		} else {
+// 			logger.Error("candidateNodeIDs error")
+// 			// log.Printf("Bỏ qua ứng cử viên %s (PeerID: %s) do thiếu dữ liệu height (ok: %t) hoặc in-degree (ok: %t).",
+// 			//	currentNodeID, pID, hOk, iOk)
+// 		}
+// 	}
+
+// 	if len(candidateNodeIDs) == 0 {
+// 		log.Println("Không có ứng cử viên hợp lệ nào sau khi lọc (ví dụ: tất cả đều là chính mình hoặc thiếu dữ liệu H/I).")
+// 		return "", "", errors.New("no valid candidates after filtering (e.g., all are self or missing H/I data)")
+// 	}
+
+// 	// Gọi thuật toán lựa chọn node
+// 	selectedNodeID, err := SelectReferenceNode(nodeHeights, nodeInDegrees, candidateNodeIDs)
+// 	if err != nil {
+// 		log.Printf("Lỗi khi chọn node tham chiếu: %v", err)
+// 		return "", "", err
+// 	}
+
+// 	selectedPID, pidExists := nodeIDToPeerIDMap[selectedNodeID]
+// 	if !pidExists {
+// 		log.Printf("Lỗi nghiêm trọng: Không tìm thấy PeerID cho NodeID đã chọn %s", selectedNodeID)
+// 		return "", "", fmt.Errorf("internal error: could not map selected NodeID %s back to PeerID", selectedNodeID)
+// 	}
+
+// 	log.Printf("Node tham chiếu được chọn cho đồng thuận: %s (PeerID: %s)", selectedNodeID, selectedPID)
+// 	return selectedNodeID, selectedPID, nil
+// }
+
+// selectConsensusPartner chọn một node đối tác để đồng bộ và tạo event một cách ngẫu nhiên.
+func (mn *ManagedNode) selectConsensusPartner() (NodeID, peer.ID, error) {
 	ownKeyHex, err := mn.getOwnPublicKeyHex()
 	if err != nil {
 		return "", "", fmt.Errorf("không thể lấy public key của chính node: %w", err)
@@ -341,6 +414,7 @@ func (mn *ManagedNode) selectConsensusPartner() (NodeID, peer.ID, error) {
 	if err != nil {
 		return "", "", fmt.Errorf("không thể lấy public key của các peer đang kết nối: %w", err)
 	}
+	logger.Info("connectedPeersMap: ", connectedPeersMap)
 
 	if len(connectedPeersMap) == 0 {
 		log.Println("Không có peer nào đang kết nối với public key đã biết để chọn làm đối tác.")
@@ -348,41 +422,28 @@ func (mn *ManagedNode) selectConsensusPartner() (NodeID, peer.ID, error) {
 	}
 
 	var candidateNodeIDs []NodeID
-	nodeHeights := make(map[NodeID]uint64)
-	nodeInDegrees := make(map[NodeID]uint64)
 	nodeIDToPeerIDMap := make(map[NodeID]peer.ID)
 
 	for pID, peerPubKeyHex := range connectedPeersMap {
 		if peerPubKeyHex == ownKeyHex { // Bỏ qua chính mình
 			continue
 		}
-		currentNodeID := GetNodeIDFromString(peerPubKeyHex) // Từ node_selection.go
+		currentNodeID := GetNodeIDFromString(peerPubKeyHex) // Từ node_selection.go (vẫn dùng GetNodeIDFromString)
 
-		h, hOk := currentDagStore.GetHeightForNode(peerPubKeyHex)   // Truyền chuỗi hex
-		i, iOk := currentDagStore.GetInDegreeForNode(peerPubKeyHex) // Truyền chuỗi hex
-
-		if hOk && iOk {
-			candidateNodeIDs = append(candidateNodeIDs, currentNodeID)
-			nodeHeights[currentNodeID] = h
-			nodeInDegrees[currentNodeID] = i
-			nodeIDToPeerIDMap[currentNodeID] = pID
-		} else {
-			// log.Printf("Bỏ qua ứng cử viên %s (PeerID: %s) do thiếu dữ liệu height (ok: %t) hoặc in-degree (ok: %t).",
-			//	currentNodeID, pID, hOk, iOk)
-		}
+		candidateNodeIDs = append(candidateNodeIDs, currentNodeID)
+		nodeIDToPeerIDMap[currentNodeID] = pID
 	}
 
 	if len(candidateNodeIDs) == 0 {
-		log.Println("Không có ứng cử viên hợp lệ nào sau khi lọc (ví dụ: tất cả đều là chính mình hoặc thiếu dữ liệu H/I).")
-		return "", "", errors.New("no valid candidates after filtering (e.g., all are self or missing H/I data)")
+		log.Println("Không có ứng cử viên hợp lệ nào sau khi lọc (ví dụ: tất cả đều là chính mình).")
+		return "", "", errors.New("no valid candidates after filtering (e.g., all are self)")
 	}
 
-	// Gọi thuật toán lựa chọn node
-	selectedNodeID, err := SelectReferenceNode(nodeHeights, nodeInDegrees, candidateNodeIDs)
-	if err != nil {
-		log.Printf("Lỗi khi chọn node tham chiếu: %v", err)
-		return "", "", err
-	}
+	// Chọn ngẫu nhiên một node từ candidateNodeIDs
+	source := rand.NewSource(time.Now().UnixNano())
+	randomGenerator := rand.New(source)
+	randomIndex := randomGenerator.Intn(len(candidateNodeIDs))
+	selectedNodeID := candidateNodeIDs[randomIndex]
 
 	selectedPID, pidExists := nodeIDToPeerIDMap[selectedNodeID]
 	if !pidExists {
@@ -390,7 +451,7 @@ func (mn *ManagedNode) selectConsensusPartner() (NodeID, peer.ID, error) {
 		return "", "", fmt.Errorf("internal error: could not map selected NodeID %s back to PeerID", selectedNodeID)
 	}
 
-	log.Printf("Node tham chiếu được chọn cho đồng thuận: %s (PeerID: %s)", selectedNodeID, selectedPID)
+	log.Printf("Node tham chiếu được chọn ngẫu nhiên cho đồng thuận: %s (PeerID: %s)", selectedNodeID, selectedPID)
 	return selectedNodeID, selectedPID, nil
 }
 
@@ -413,6 +474,7 @@ func (mn *ManagedNode) consensusLoop() {
 
 			partnerNodeID, partnerPeerID, err := mn.selectConsensusPartner()
 			if err != nil {
+				logger.Error(err)
 				log.Printf("Không thể chọn node đối tác trong vòng này: %v", err)
 				continue // Chuyển sang vòng lặp tiếp theo
 			}
@@ -446,7 +508,7 @@ func (mn *ManagedNode) setupConnectionNotifier() {
 		ConnectedF: func(net network.Network, conn network.Conn) {
 			peerID := conn.RemotePeer()
 			log.Printf("✅ Đã kết nối tới peer: %s (Địa chỉ: %s)", peerID, conn.RemoteMultiaddr())
-
+			logger.Error("peerID", peerID)
 			pubKey := conn.RemotePublicKey() // Lấy public key từ kết nối
 			if pubKey == nil {
 				log.Printf("Cảnh báo: Không thể lấy public key cho peer %s từ kết nối.", peerID)
@@ -459,6 +521,7 @@ func (mn *ManagedNode) setupConnectionNotifier() {
 					mn.peerPubKeyMutex.Lock()
 					mn.connectedPeerPubKeys[peerID] = pubKeyHex // Lưu trữ public key hex
 					mn.peerPubKeyMutex.Unlock()
+					logger.Info(mn.connectedPeerPubKeys)
 					log.Printf("Đã lưu trữ public key hex '%s...' cho peer %s", pubKeyHex[:min(10, len(pubKeyHex))], peerID)
 				}
 			}

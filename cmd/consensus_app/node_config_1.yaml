@@ -1,19 +1,19 @@
 # Địa chỉ và port mà node sẽ lắng nghe các kết nối đến từ các peer khác.
 # Ví dụ: "/ip4/0.0.0.0/tcp/9001" (lắng nghe trên tất cả các interface IPv4, port 9001, dùng TCP)
 # Hoặc "/ip4/0.0.0.0/udp/9001/quic-v1" (dùng QUIC qua UDP)
-listenAddress: "/ip4/0.0.0.0/udp/8001/quic-v1"
+listenAddress: "/ip4/0.0.0.0/udp/8002/quic-v1"
 
 # Khóa riêng tư của node, được mã hóa bằng Base64.
 # Nếu để trống hoặc không có trường này, ManagedNode sẽ tự tạo một khóa mới (hữu ích cho dev/test).
 # Để tạo một khóa: bạn có thể dùng các công cụ libp2p hoặc để node tự tạo lần đầu rồi sao chép ra.
-privateKey: "CAESQARJRQAdvXEqx9cbCFgf/gmbhgwM3FG7P4WIaMyzSS//0/HoGYJvzilWa7OIZOFvshjPe/048yauXVGUl0CA0CU="
+privateKey: "CAESQLR7tZEOOzOcdWKweJopyAH5BurtqIkvIL0HnbMtnJPTXQyyuZxwJMdogoXl6txnxgS3hnLHUC38f0eU1t7CGLY="
 
 # Danh sách các bootstrap peer để node kết nối khi khởi động.
 # Mỗi peer là một multiaddress đầy đủ (bao gồm /p2p/<PeerID>).
 bootstrapPeers:
-  - "/ip4/127.0.0.1/udp/8002/quic-v1/p2p/12D3KooWG5bKDw3hc3fsDd1PY4cR3JDfhDn1abbHRKig5mfeQGqK"
+  - "/ip4/127.0.0.1/udp/8001/quic-v1/p2p/12D3KooWQ5i8sRfvdhkKaPu4aGQ8sRJCAYyRENf16ZydxM9boAEY"
   - "/ip4/127.0.0.1/udp/8003/quic-v1/p2p/12D3KooWEBSxQRsY3akf5gMKZsmiY7zthkV8LSk7PdP4YSXJTiXA"
-masterNodeAddress: "/ip4/127.0.0.1/tcp/9000/p2p/12D3KooWM3MudyzXTZTUafyxXQQBNKeK9cpX9QekgB9bPsRwNGvS"
+masterNodeAddress: "/ip4/127.0.0.1/tcp/9001/p2p/12D3KooWJ2s3WiamQxiHK43yU3fsTHrgMLNteW1Hr5RpqcKdZUzu"
 # Loại của node này (ví dụ: "master", "sub", "validator", "light-client").
 # Logic ứng dụng của bạn có thể dựa vào giá trị này.
 nodeType: "consensus"
