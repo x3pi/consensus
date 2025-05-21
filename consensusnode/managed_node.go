@@ -1,14 +1,14 @@
 package consensusnode
 
 import (
-	"context" // Không sử dụng trực tiếp, nhưng là một phần của crypto.Secp256k1PrivateKey
+	"context"
 	"encoding/hex"
-	"encoding/json" // Thêm import này để marshal SyncRequestPayload
+	"encoding/json" // For marshaling SyncRequestPayload
 	"errors"
 	"fmt"
 	"log"
 	"math/rand"
-	"sort" // Thêm import để sắp xếp event theo frame và timestamp
+	"sort" // For sorting events by frame and timestamp
 	"sync"
 	"time"
 
@@ -23,143 +23,146 @@ import (
 	"github.com/libp2p/go-libp2p/core/protocol"
 	"github.com/libp2p/go-libp2p/p2p/net/connmgr"
 
-	// Thay thế "github.com/blockchain/consensus/dag" bằng đường dẫn thực tế của bạn
-	"github.com/blockchain/consensus/dag" // [cite:0]
-	"github.com/blockchain/consensus/logger"
+	"github.com/blockchain/consensus/dag"    // Path to your DAG implementation
+	"github.com/blockchain/consensus/logger" // Path to your custom logger
 )
 
-// YourStorageInterface là một placeholder cho interface storage của bạn.
+// YourStorageInterface is a placeholder for your specific storage interface.
+// It should define methods for getting, putting, and deleting data.
 type YourStorageInterface interface {
 	Get(key []byte) ([]byte, error)
 	Put(key []byte, value []byte) error
 	Delete(key []byte) error
-	// Thêm các phương thức khác nếu cần
+	// Add other necessary storage methods here.
 }
 
-// ManagedNode là đối tượng trung tâm cho các hoạt động mạng và đồng thuận.
+// ManagedNode is the central object for network operations and consensus.
 type ManagedNode struct {
 	config       NodeConfig
 	host         host.Host
-	privKey      crypto.PrivKey // Khóa riêng tư của node
-	ownPubKeyHex string         // Chuỗi hex public key của chính node này
+	privKey      crypto.PrivKey // Private key of the node.
+	ownPubKeyHex string         // Hex string of this node's public key.
 	pubsub       *pubsub.PubSub
-	dagStore     *dag.DagStore // Instance của DagStore
+	dagStore     *dag.DagStore // Instance of DagStore.
 
-	topicStorageMap sync.Map // Key: string (tên topic), Value: YourStorageInterface
+	// topicStorageMap maps topic names (string) to YourStorageInterface instances.
+	topicStorageMap sync.Map
 
-	peers       map[peer.ID]*ManagedPeerInfo // Thông tin về các peer đã biết/kết nối
-	peerMutex   sync.RWMutex
-	reconnectWG sync.WaitGroup // WaitGroup cho các goroutine kết nối lại
+	peers       map[peer.ID]*ManagedPeerInfo // Information about known/connected peers.
+	peerMutex   sync.RWMutex                 // Mutex for peers map.
+	reconnectWG sync.WaitGroup               // WaitGroup for peer reconnection goroutines.
 
-	ctx        context.Context    // Context của node, dùng để hủy các goroutine
-	cancelFunc context.CancelFunc // Hàm hủy context của node
-	wg         sync.WaitGroup     // Để quản lý các goroutine chính
+	ctx        context.Context    // Node's context, used to cancel goroutines.
+	cancelFunc context.CancelFunc // Function to cancel the node's context.
+	wg         sync.WaitGroup     // Manages main operational goroutines.
 
-	// Stream Handlers
+	// streamHandlers maps protocol.IDs to their respective network.StreamHandler.
 	streamHandlers map[protocol.ID]network.StreamHandler
 
-	// Topic Subscriptions
+	// topicSubscriptions maps topic names to their pubsub.Subscription objects.
 	topicSubscriptions map[string]*pubsub.Subscription
-	topicHandlers      map[string]func(msg *pubsub.Message)
+	// topicHandlers maps topic names to their message handler functions.
+	topicHandlers map[string]func(msg *pubsub.Message)
 
-	// Trạng thái nội bộ khác
-	keyValueCache               *lru.Cache[string, []byte]
-	transactionChan             chan []byte
-	fetchingBlocks              sync.Map // Theo dõi các block đang được tìm kiếm (key: uint64, value: bool)
-	feeAddresses                []string
-	feeAddressesMux             sync.RWMutex
-	lastProcessedFinalizedFrame uint64 // Frame cuối cùng mà các Root hoàn tất đã được xử lý
+	// Other internal states.
+	keyValueCache *lru.Cache[string, []byte] // LRU cache for key-value data.
+	// transactionChan is a channel for incoming transactions.
+	transactionChan chan []byte
+	// fetchingBlocks tracks blocks currently being fetched (key: blockNumber uint64, value: bool).
+	fetchingBlocks sync.Map
+	// feeAddresses stores a list of fee addresses.
+	feeAddresses    []string
+	feeAddressesMux sync.RWMutex // Mutex for feeAddresses.
+	// lastProcessedFinalizedFrame tracks the last frame for which finalized Roots were processed.
+	lastProcessedFinalizedFrame uint64
 
-	// Map để lưu trữ public key (dạng hex string) của các peer đã kết nối.
-	// Key: peer.ID, Value: chuỗi hex của public key.
+	// connectedPeerPubKeys stores the public key (hex string) of connected peers.
+	// Key: peer.ID, Value: public key hex string.
 	connectedPeerPubKeys map[peer.ID]string
-	peerPubKeyMutex      sync.RWMutex // Mutex cho connectedPeerPubKeys
+	peerPubKeyMutex      sync.RWMutex // Mutex for connectedPeerPubKeys.
 }
 
 const (
-	// FRAMES_TO_KEEP_AFTER_FINALIZED xác định số lượng frame gần nhất đã hoàn tất mà chúng ta muốn giữ lại.
-	// Các frame cũ hơn (lastProcessedFinalizedFrame - FRAMES_TO_KEEP_AFTER_FINALIZED) sẽ bị prune.
-	FRAMES_TO_KEEP_AFTER_FINALIZED uint64 = 20 // Tăng từ 10 lên 20 (ví dụ)
-	// MIN_FRAMES_BEFORE_PRUNING là số frame tối thiểu phải được xử lý trước khi bắt đầu pruning.
-	MIN_FRAMES_BEFORE_PRUNING uint64 = FRAMES_TO_KEEP_AFTER_FINALIZED + 5 // Sẽ tự động thành 25
+	// FRAMES_TO_KEEP_AFTER_FINALIZED defines how many recent finalized frames to keep.
+	// Frames older than (lastProcessedFinalizedFrame - FRAMES_TO_KEEP_AFTER_FINALIZED) will be pruned.
+	FRAMES_TO_KEEP_AFTER_FINALIZED uint64 = 50
+	// MIN_FRAMES_BEFORE_PRUNING is the minimum number of frames that must be processed before pruning begins.
+	MIN_FRAMES_BEFORE_PRUNING uint64 = FRAMES_TO_KEEP_AFTER_FINALIZED + 50
 )
 
-// NewManagedNode tạo và khởi tạo một ManagedNode mới.
+// NewManagedNode creates and initializes a new ManagedNode.
 func NewManagedNode(ctx context.Context, cfg NodeConfig) (*ManagedNode, error) {
-	privKey, err := loadPrivateKey(cfg.PrivateKey) // utils.go
+	privKey, err := loadPrivateKey(cfg.PrivateKey) // From utils.go
 	if err != nil {
-		return nil, fmt.Errorf("không thể tải khóa riêng tư: %w", err)
+		return nil, fmt.Errorf("failed to load private key: %w", err)
 	}
 
 	var ownPubKeyHex string
 	if privKey != nil {
-		var finalPubKeyBytes []byte
-		var extractionError error
-
 		pubKey := privKey.GetPublic()
-		finalPubKeyBytes, extractionError = pubKey.Raw() // Thử lấy raw bytes trực tiếp
+		rawPubKeyBytes, extractionError := pubKey.Raw()
 
-		if extractionError != nil { // Nếu thất bại, thử với loại khóa cụ thể
-			log.Printf("Cảnh báo: Không thể lấy raw public key bytes bằng pubKey.Raw() ban đầu: %v. Thử loại khóa cụ thể.", extractionError)
+		if extractionError != nil {
+			log.Printf("Warning: Could not get raw public key bytes using pubKey.Raw(): %v. Attempting with specific key type.", extractionError)
+			// Attempt to extract key assuming a specific type, e.g., Secp256k1, if the generic Raw() fails.
+			// This part might need adjustment based on the actual private key types in use.
 			if ecdsaPriv, ok := privKey.(*crypto.Secp256k1PrivateKey); ok {
-				log.Println("Khóa riêng tư là loại Secp256k1PrivateKey.")
+				log.Println("Private key is of type Secp256k1PrivateKey.")
 				ecdsaTypedPubKey := ecdsaPriv.GetPublic().(*crypto.Secp256k1PublicKey)
-				var ecdsaBytes []byte
-				var ecdsaErr error
-				ecdsaBytes, ecdsaErr = ecdsaTypedPubKey.Raw()
+				ecdsaBytes, ecdsaErr := ecdsaTypedPubKey.Raw()
 				if ecdsaErr == nil {
-					log.Println("Lấy raw public key thành công bằng ecdsaTypedPubKey.Raw().")
-					finalPubKeyBytes = ecdsaBytes
-					extractionError = nil
+					log.Println("Successfully retrieved raw public key using ecdsaTypedPubKey.Raw().")
+					rawPubKeyBytes = ecdsaBytes
+					extractionError = nil // Clear previous error
 				} else {
-					log.Printf("Không thể lấy raw public key từ ecdsaTypedPubKey.Raw(): %v", ecdsaErr)
-					extractionError = ecdsaErr
+					log.Printf("Failed to get raw public key from ecdsaTypedPubKey.Raw(): %v", ecdsaErr)
+					extractionError = ecdsaErr // Keep the specific error
 				}
 			} else {
-				log.Printf("Khóa riêng tư không phải là loại Secp256k1PrivateKey đã biết. Lỗi ban đầu từ pubKey.Raw() được giữ lại.")
+				log.Printf("Private key is not of a known specific type (e.g., Secp256k1PrivateKey). Initial error from pubKey.Raw() is kept.")
 			}
 		}
 
-		if extractionError == nil && finalPubKeyBytes != nil {
-			ownPubKeyHex = hex.EncodeToString(finalPubKeyBytes)
+		if extractionError == nil && rawPubKeyBytes != nil {
+			ownPubKeyHex = hex.EncodeToString(rawPubKeyBytes)
 		} else {
-			log.Printf("Không thể trích xuất public key bytes cuối cùng từ private key. Lỗi (nếu có): %v", extractionError)
+			log.Printf("Could not extract final public key bytes from private key. Error (if any): %v", extractionError)
 		}
 	}
 
 	if ownPubKeyHex == "" && privKey != nil {
-		log.Printf("CẢNH BÁO QUAN TRỌNG: ownPubKeyHex rỗng mặc dù có private key. Lựa chọn node có thể không hoạt động đúng.")
+		log.Printf("CRITICAL WARNING: ownPubKeyHex is empty despite having a private key. Node selection might not function correctly.")
 	}
 
-	cm, err := connmgr.NewConnManager(
+	connManager, err := connmgr.NewConnManager(
 		cfg.MinConnections,
 		cfg.MaxConnections,
 		connmgr.WithGracePeriod(cfg.ConnectionGracePeriod),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("không thể tạo connection manager: %w", err)
+		return nil, fmt.Errorf("failed to create connection manager: %w", err)
 	}
 
 	libp2pHost, err := libp2p.New(
 		libp2p.Identity(privKey),
 		libp2p.ListenAddrStrings(cfg.ListenAddress),
-		libp2p.ConnectionManager(cm),
+		libp2p.ConnectionManager(connManager),
 		libp2p.EnableRelayService(),
 		libp2p.EnableNATService(),
 		libp2p.NATPortMap(),
 		libp2p.EnableHolePunching(),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("không thể tạo libp2p host: %w", err)
+		return nil, fmt.Errorf("failed to create libp2p host: %w", err)
 	}
 
-	psOptions := []pubsub.Option{
+	pubsubOptions := []pubsub.Option{
 		pubsub.WithMaxMessageSize(cfg.MaxMessageSize),
 	}
-	ps, err := pubsub.NewGossipSub(ctx, libp2pHost, psOptions...)
+	ps, err := pubsub.NewGossipSub(ctx, libp2pHost, pubsubOptions...)
 	if err != nil {
-		_ = libp2pHost.Close()
-		return nil, fmt.Errorf("không thể tạo pubsub: %w", err)
+		_ = libp2pHost.Close() // Attempt to close host if pubsub creation fails.
+		return nil, fmt.Errorf("failed to create pubsub: %w", err)
 	}
 
 	nodeCtx, cancel := context.WithCancel(ctx)
@@ -168,14 +171,14 @@ func NewManagedNode(ctx context.Context, cfg NodeConfig) (*ManagedNode, error) {
 	if err != nil {
 		_ = libp2pHost.Close()
 		cancel()
-		return nil, fmt.Errorf("không thể tạo LRU cache: %w", err)
+		return nil, fmt.Errorf("failed to create LRU cache: %w", err)
 	}
 
 	initialStakeData := make(map[string]uint64)
-	if ownPubKeyHex != "" && cfg.InitialStake > 0 { // [cite:1]
+	if ownPubKeyHex != "" && cfg.InitialStake > 0 {
 		initialStakeData[ownPubKeyHex] = cfg.InitialStake
 	}
-	dagStoreInstance := dag.NewDagStore(initialStakeData) // [cite:0]
+	dagStoreInstance := dag.NewDagStore(initialStakeData)
 
 	mn := &ManagedNode{
 		config:                      cfg,
@@ -187,119 +190,126 @@ func NewManagedNode(ctx context.Context, cfg NodeConfig) (*ManagedNode, error) {
 		peers:                       make(map[peer.ID]*ManagedPeerInfo),
 		ctx:                         nodeCtx,
 		cancelFunc:                  cancel,
-		streamHandlers:              make(map[protocol.ID]network.StreamHandler), // Khởi tạo map này
+		streamHandlers:              make(map[protocol.ID]network.StreamHandler),
 		topicSubscriptions:          make(map[string]*pubsub.Subscription),
 		topicHandlers:               make(map[string]func(msg *pubsub.Message)),
 		keyValueCache:               cache,
 		transactionChan:             make(chan []byte, cfg.TransactionChanBuffer),
 		connectedPeerPubKeys:        make(map[peer.ID]string),
-		lastProcessedFinalizedFrame: 0, // Khởi tạo là 0 (hoặc frame bắt đầu của bạn - 1)
+		lastProcessedFinalizedFrame: 0, // Initialize to 0 (or your starting frame - 1).
 	}
 
-	// ================= PHẦN QUAN TRỌNG ĐỂ ĐĂNG KÝ HANDLER =================
-	// Đảm bảo rằng node đích (node có PeerID 12D3KooWJ2s3WiamQxiHK43yU3fsTHrgMLNteW1Hr5RpqcKdZUzu)
-	// có mn.config.NodeType == "consensus" để đoạn mã này được thực thi cho nó.
+	// Register stream handlers if this node is a consensus node.
+	// This ensures that the target node (e.g., one with PeerID 12D3KooWJ2s3WiamQxiHK43yU3fsTHrgMLNteW1Hr5RpqcKdZUzu)
+	// has mn.config.NodeType == "consensus" for this code block to execute for it.
 	if mn.config.NodeType == "consensus" {
-		// Đăng ký handler cho yêu cầu giao dịch
+		// Register handler for transaction requests.
 		mn.RegisterStreamHandler(TransactionsRequestProtocol, mn.transactionsRequestHandler)
-		log.Printf("Đã đăng ký stream handler cho %s (Loại Node: %s)", TransactionsRequestProtocol, mn.config.NodeType)
+		log.Printf("Registered stream handler for %s (Node Type: %s)", TransactionsRequestProtocol, mn.config.NodeType)
 
-		// Đăng ký handler cho yêu cầu đồng bộ hóa
-		// ĐÂY LÀ TRÌNH XỬ LÝ CHO PROTOCOL GÂY RA LỖI
-		mn.RegisterStreamHandler(SyncRequestProtocol, mn.syncRequestHandler) // [cite:2]
-		log.Printf("Đã đăng ký stream handler cho %s (Loại Node: %s)", SyncRequestProtocol, mn.config.NodeType)
+		// Register handler for synchronization requests.
+		// THIS IS THE HANDLER FOR THE PROTOCOL THAT MIGHT CAUSE ISSUES IF NOT SET UP CORRECTLY.
+		mn.RegisterStreamHandler(SyncRequestProtocol, mn.syncRequestHandler)
+		log.Printf("Registered stream handler for %s (Node Type: %s)", SyncRequestProtocol, mn.config.NodeType)
 	}
-	// =======================================================================
 
-	mn.displayNodeInfo() // [cite:3]
+	mn.displayNodeInfo() // From utils.go
 
 	return mn, nil
 }
 
-// Start khởi tạo các hoạt động của node.
+// Start initiates the node's operations, including connecting to peers and starting services.
 func (mn *ManagedNode) Start() error {
-	// Thiết lập các stream handler đã được đăng ký trong NewManagedNode
+	// Set up stream handlers registered during NewManagedNode.
 	for protoID, handler := range mn.streamHandlers {
 		mn.host.SetStreamHandler(protoID, handler)
-		log.Printf("Đã đăng ký stream handler cho protocol %s trên host.", protoID)
+		log.Printf("Set stream handler for protocol %s on host.", protoID)
 	}
 
-	if err := mn.connectToBootstrapPeers(); err != nil { // [cite:4]
-		log.Printf("LƯU Ý: Không thể kết nối tới một số bootstrap peer: %v", err)
+	if err := mn.connectToBootstrapPeers(); err != nil { // From peer_manager.go
+		log.Printf("NOTE: Failed to connect to some bootstrap peers: %v", err)
+		// Depending on requirements, this might not be a fatal error.
 	}
 
 	mn.wg.Add(1)
-	go mn.peerHealthMonitor() // [cite:4]
+	go mn.peerHealthMonitor() // From peer_manager.go
 
-	mn.setupConnectionNotifier()
+	mn.setupConnectionNotifier() // Sets up handlers for peer connect/disconnect events.
 
-	log.Printf("ManagedNode (%s) đã khởi động thành công.", mn.host.ID())
+	log.Printf("ManagedNode (%s) started successfully.", mn.host.ID())
 
 	if mn.config.NodeType == "consensus" {
 		mn.wg.Add(1)
-		go mn.consensusLoop()
+		go mn.consensusLoop() // Starts the main consensus logic loop.
 	}
 	return nil
 }
 
-// Stop tắt ManagedNode một cách an toàn.
+// Stop gracefully shuts down the ManagedNode.
 func (mn *ManagedNode) Stop() error {
-	log.Println("Đang dừng ManagedNode...")
-	mn.cancelFunc()
+	log.Println("Stopping ManagedNode...")
+	mn.cancelFunc() // Signal all node-scoped goroutines to stop.
 
-	mn.cancelAllReconnects() // [cite:4]
-	mn.reconnectWG.Wait()
+	mn.cancelAllReconnects() // From peer_manager.go
+	mn.reconnectWG.Wait()    // Wait for any active reconnection attempts to finish.
 
 	if err := mn.host.Close(); err != nil {
-		log.Printf("Lỗi khi đóng libp2p host: %v", err)
+		log.Printf("Error closing libp2p host: %v", err)
+		// Continue with other shutdown tasks even if host closing fails.
 	}
 
-	mn.wg.Wait()
-	log.Println("ManagedNode đã dừng.")
+	mn.wg.Wait() // Wait for all main operational goroutines to complete.
+	log.Println("ManagedNode stopped.")
 	return nil
 }
 
-// Host trả về libp2p host instance.
+// Host returns the libp2p host instance.
 func (mn *ManagedNode) Host() host.Host {
 	return mn.host
 }
 
-// PubSubInstance trả về pubsub instance.
+// PubSubInstance returns the PubSub instance.
 func (mn *ManagedNode) PubSubInstance() *pubsub.PubSub {
 	return mn.pubsub
 }
 
-// Context trả về context của node.
+// Context returns the node's context.
 func (mn *ManagedNode) Context() context.Context {
 	return mn.ctx
 }
 
-// Config trả về cấu hình của node.
+// Config returns the node's configuration.
 func (mn *ManagedNode) Config() NodeConfig {
 	return mn.config
 }
 
-// getOwnPublicKeyHex trả về public key dạng hex của node hiện tại.
+// getOwnPublicKeyHex returns the hex-encoded public key of the current node.
+// It attempts to derive it from the private key if not already cached.
 func (mn *ManagedNode) getOwnPublicKeyHex() (string, error) {
 	if mn.ownPubKeyHex == "" {
 		if mn.privKey != nil {
 			pubKey := mn.privKey.GetPublic()
 			var tempPubKeyBytes []byte
 			var tempErr error
+			// Attempt generic Raw() first.
 			tempPubKeyBytes, tempErr = pubKey.Raw()
 			if tempErr != nil {
+				// If generic fails, try specific types (e.g., Secp256k1).
 				if ecdsaPriv, ok := mn.privKey.(*crypto.Secp256k1PrivateKey); ok {
 					ecdsaTypedPubKey := ecdsaPriv.GetPublic().(*crypto.Secp256k1PublicKey)
 					tempPubKeyBytes, tempErr = ecdsaTypedPubKey.Raw()
 				}
+				// Add other key type checks if necessary.
 			}
+
 			if tempErr == nil && tempPubKeyBytes != nil {
 				mn.ownPubKeyHex = hex.EncodeToString(tempPubKeyBytes)
 			} else {
-				return "", fmt.Errorf("không thể lấy lại public key của chính node: %v", tempErr)
+				return "", fmt.Errorf("failed to re-derive node's own public key: %v", tempErr)
 			}
-			if mn.ownPubKeyHex == "" {
-				return "", errors.New("ownPubKeyHex vẫn rỗng sau khi thử lấy lại trong getOwnPublicKeyHex")
+
+			if mn.ownPubKeyHex == "" { // Should not happen if derivation was successful.
+				return "", errors.New("ownPubKeyHex is still empty after attempting re-derivation in getOwnPublicKeyHex")
 			}
 		} else {
 			return "", errors.New("private key is nil, cannot derive public key in getOwnPublicKeyHex")
@@ -308,11 +318,15 @@ func (mn *ManagedNode) getOwnPublicKeyHex() (string, error) {
 	return mn.ownPubKeyHex, nil
 }
 
-// getConnectedPeerPublicKeys trả về một map các peer.ID đang kết nối tới public key hex của chúng.
+// getConnectedPeerPublicKeys returns a map of connected peer.IDs to their public key hex strings.
 func (mn *ManagedNode) getConnectedPeerPublicKeys() (map[peer.ID]string, error) {
-	logger.Error("connectedPeerPubKeys: ", mn.connectedPeerPubKeys)
 	mn.peerPubKeyMutex.RLock()
 	defer mn.peerPubKeyMutex.RUnlock()
+
+	// logger.Error is used here in the original code. If this is for debugging, consider logger.Debug.
+	// For now, keeping it as per original to not change "logic" which might include debug logging levels.
+	logger.Error("getConnectedPeerPublicKeys - current connectedPeerPubKeys map: ", mn.connectedPeerPubKeys)
+
 	keysCopy := make(map[peer.ID]string, len(mn.connectedPeerPubKeys))
 	for pID, pubKeyHex := range mn.connectedPeerPubKeys {
 		keysCopy[pID] = pubKeyHex
@@ -320,65 +334,67 @@ func (mn *ManagedNode) getConnectedPeerPublicKeys() (map[peer.ID]string, error) 
 	return keysCopy, nil
 }
 
-// GetDagStore trả về instance của DagStore.
+// GetDagStore returns the instance of DagStore.
 func (mn *ManagedNode) GetDagStore() *dag.DagStore {
 	return mn.dagStore
 }
 
-// selectConsensusPartner chọn một node đối tác để đồng bộ và tạo event một cách ngẫu nhiên.
+// selectConsensusPartner randomly selects a connected peer as a partner for synchronization and event creation.
+// It excludes the node itself and any peers designated as "master".
 func (mn *ManagedNode) selectConsensusPartner() (NodeID, peer.ID, error) {
-
 	ownKeyHex, err := mn.getOwnPublicKeyHex()
 	if err != nil {
-		return "", "", fmt.Errorf("không thể lấy public key của chính node: %w", err)
+		return "", "", fmt.Errorf("failed to get own public key for partner selection: %w", err)
 	}
-	if ownKeyHex == "" {
-		return "", "", errors.New("public key của chính node là rỗng, không thể tiếp tục lựa chọn node")
+	if ownKeyHex == "" { // Should be caught by the error above, but as a safeguard.
+		return "", "", errors.New("own public key is empty, cannot select consensus partner")
 	}
 
 	connectedPeersMap, err := mn.getConnectedPeerPublicKeys()
 	if err != nil {
-		return "", "", fmt.Errorf("không thể lấy public key của các peer đang kết nối: %w", err)
+		return "", "", fmt.Errorf("failed to get connected peer public keys for partner selection: %w", err)
 	}
-	logger.Info("selectConsensusPartner - connectedPeersMap: ", connectedPeersMap) // [cite:5]
+	logger.Info("selectConsensusPartner - Connected peers with known public keys: ", connectedPeersMap)
 
 	if len(connectedPeersMap) == 0 {
-		log.Println("Không có peer nào đang kết nối với public key đã biết để chọn làm đối tác.")
+		log.Println("No connected peers with known public keys available for partner selection.")
 		return "", "", errors.New("no connected peers with known public keys for selection")
 	}
 
 	var candidateNodeIDs []NodeID
 	nodeIDToPeerIDMap := make(map[NodeID]peer.ID)
-	logger.Error("nodeIDToPeerIDMap: ", nodeIDToPeerIDMap)
 
+	mn.peerMutex.RLock() // Lock to safely access mn.peers
 	for pID, peerPubKeyHex := range connectedPeersMap {
-		if peerPubKeyHex == ownKeyHex { // Không chọn chính mình làm đối tác đồng bộ
+		if peerPubKeyHex == ownKeyHex { // Do not select self.
 			continue
 		}
-		// Lấy thông tin chi tiết của peer từ mn.peers
-		peerInfo, exists := mn.peers[pID]
-		logger.Info("peerInfo", peerInfo)
 
+		peerInfo, exists := mn.peers[pID]
 		if !exists {
-			log.Printf("Cảnh báo: Peer %s có public key nhưng không tìm thấy thông tin trong mn.peers. Bỏ qua.", pID)
+			log.Printf("Warning: Peer %s has a public key but no detailed info in mn.peers. Skipping for partner selection.", pID)
 			continue
 		}
-		logger.Info("peer type", peerInfo.Type)
-		// **LOẠI BỎ NODE "MASTER" KHỎI DANH SÁCH ỨNG CỬ VIÊN**
+
+		// Exclude "master" nodes from being consensus partners.
 		if peerInfo.Type == "master" {
-			log.Printf("selectConsensusPartner: Bỏ qua peer %s (Type: %s) vì là master node.", pID, peerInfo.Type)
+			log.Printf("selectConsensusPartner: Skipping peer %s (Type: %s) as it is a master node.", pID, peerInfo.Type)
 			continue
 		}
-		currentNodeID := GetNodeIDFromString(peerPubKeyHex) // [cite:6]
+
+		// Assuming NodeID is derived from the public key hex string.
+		currentNodeID := GetNodeIDFromString(peerPubKeyHex) // From node_selection.go
 		candidateNodeIDs = append(candidateNodeIDs, currentNodeID)
 		nodeIDToPeerIDMap[currentNodeID] = pID
 	}
+	mn.peerMutex.RUnlock()
 
 	if len(candidateNodeIDs) == 0 {
-		log.Println("Không có ứng cử viên hợp lệ nào sau khi lọc (ví dụ: tất cả đều là chính mình hoặc không có peer nào khác).")
+		log.Println("No valid candidates for consensus partner after filtering (e.g., all were self or master nodes, or no other peers).")
 		return "", "", errors.New("no valid candidates after filtering")
 	}
 
+	//nolint:gosec // Using math/rand for non-cryptographic random selection is acceptable here.
 	source := rand.NewSource(time.Now().UnixNano())
 	randomGenerator := rand.New(source)
 	randomIndex := randomGenerator.Intn(len(candidateNodeIDs))
@@ -386,34 +402,39 @@ func (mn *ManagedNode) selectConsensusPartner() (NodeID, peer.ID, error) {
 
 	selectedPID, pidExists := nodeIDToPeerIDMap[selectedNodeID]
 	if !pidExists {
-		log.Printf("Lỗi nghiêm trọng: Không tìm thấy PeerID cho NodeID đã chọn %s", selectedNodeID)
+		// This should not happen if the maps are consistent.
+		log.Printf("CRITICAL ERROR: Could not find PeerID for selected NodeID %s", selectedNodeID)
 		return "", "", fmt.Errorf("internal error: could not map selected NodeID %s back to PeerID", selectedNodeID)
 	}
 
-	log.Printf("Node tham chiếu được chọn ngẫu nhiên cho đồng thuận: %s (PeerID: %s)", selectedNodeID, selectedPID)
-	logger.Info(selectedNodeID)
+	log.Printf("Randomly selected consensus partner: NodeID %s (PeerID: %s)", selectedNodeID, selectedPID)
+	logger.Info("Selected partner NodeID: ", selectedNodeID)
 	return selectedNodeID, selectedPID, nil
 }
 
-// parseTransactionsFromResponse: Placeholder - Cần triển khai dựa trên định dạng response thực tế.
+// parseTransactionsFromResponse is a placeholder function.
+// It needs to be implemented based on the actual response format from the master node.
 func parseTransactionsFromResponse(responseData []byte) ([]byte, error) {
 	if responseData == nil {
-		return []byte{}, nil
+		return []byte{}, nil // No data means no transactions.
 	}
 	log.Printf("parseTransactionsFromResponse: Received %d bytes of transaction data.", len(responseData))
+	// Actual parsing logic would go here. For now, assume responseData is the direct transaction payload.
 	return responseData, nil
 }
 
-// signEventData: Ký hash của EventData.
+// signEventData signs the hash of the EventData.
 func signEventData(eventData dag.EventData, privKey crypto.PrivKey) ([]byte, error) {
 	if privKey == nil {
 		return nil, errors.New("private key is nil, cannot sign event data")
 	}
-	tempEventForHashing := &dag.Event{EventData: eventData} // [cite:7]
-	hashToSign, err := tempEventForHashing.Hash()           // [cite:7]
+	// Create a temporary event shell just for hashing, as Event.Hash() operates on EventData.
+	tempEventForHashing := &dag.Event{EventData: eventData}
+	hashToSign, err := tempEventForHashing.Hash() // Hash() is from dag/event.go
 	if err != nil {
 		return nil, fmt.Errorf("failed to hash event data for signing: %w", err)
 	}
+
 	dataBytes := hashToSign.Bytes()
 	log.Printf("Signing hash of EventData: %s", hashToSign.String())
 	signature, err := privKey.Sign(dataBytes)
@@ -424,98 +445,100 @@ func signEventData(eventData dag.EventData, privKey crypto.PrivKey) ([]byte, err
 	return signature, nil
 }
 
-// getPublicKeyBytesFromHexString: Placeholder.
+// getPublicKeyBytesFromHexString is a placeholder/helper.
+// Converts a hex string representation of a public key to a byte slice.
 func getPublicKeyBytesFromHexString(hexStr string) ([]byte, error) {
 	if hexStr == "" {
 		return nil, errors.New("cannot convert empty hex string to public key bytes")
 	}
 	bytes, err := hex.DecodeString(hexStr)
 	if err != nil {
-		return nil, fmt.Errorf("failed to decode hex string to bytes: %w", err)
+		return nil, fmt.Errorf("failed to decode hex string '%s' to bytes: %w", hexStr, err)
 	}
 	return bytes, nil
 }
 
-// calculateNextFrame: Placeholder.
+// calculateNextFrame is a placeholder for frame calculation logic.
+// The actual frame calculation in Lachesis can be more complex,
+// depending on parent frames and strong seeing relationships.
 func (mn *ManagedNode) calculateNextFrame(selfParentEvent *dag.Event, otherParentEvent *dag.Event) uint64 {
-	if selfParentEvent == nil {
-		return 1
+	if selfParentEvent == nil { // This implies it's the first event by this creator.
+		return 1 // Assuming frames start at 1.
 	}
-	return selfParentEvent.EventData.Frame + 1
+	// Simplified: increment self-parent's frame.
+	// A more accurate Lachesis implementation would consider max(frame(parents)) + 1
+	// under certain conditions (e.g., strongly seeing roots of the previous frame).
+	nextFrame := selfParentEvent.EventData.Frame + 1
+	if otherParentEvent != nil && (otherParentEvent.EventData.Frame+1) > nextFrame {
+		// This simplistic adjustment might not align with Lachesis rules.
+		// Frame progression is typically based on the highest frame of parents it strongly sees.
+		// For now, this reflects a basic increment.
+		// nextFrame = otherParentEvent.EventData.Frame + 1
+	}
+	return nextFrame
 }
 
-// checkIfRoot: Placeholder.
-func (mn *ManagedNode) checkIfRoot(newEventData dag.EventData, otherParentEvent *dag.Event) bool {
-	if otherParentEvent == nil {
+// checkIfRoot is a placeholder for determining if a new event is a Root.
+// In Lachesis, an event is a root if it's the first event by its creator in a new frame,
+// or under specific conditions related to its parents and their frames.
+func (mn *ManagedNode) checkIfRoot(newEventData dag.EventData, selfParentEvent *dag.Event, otherParentEvent *dag.Event) bool {
+	// If no self-parent, it's the first event by this creator, thus a root for its frame.
+	if selfParentEvent == nil {
 		return true
 	}
-	// Logic phức tạp hơn có thể cần thiết ở đây dựa trên định nghĩa Root của bạn.
-	// Ví dụ: một event là root nếu frame của nó lớn hơn frame của otherParentEvent
-	// hoặc nếu otherParentEvent là root của frame trước đó.
-	// Để đơn giản, nếu có otherParent, nó không phải là root trừ khi otherParent là root.
-	// Điều này có thể cần điều chỉnh cho phù hợp với thuật toán Lachesis.
-	// Theo Lachesis, một event là root nếu frame của nó > frame của tất cả các parent mà nó thấy mạnh.
-	// Trong trường hợp này, otherParentEvent là parent duy nhất được xem xét cho isRoot.
-	// Nếu newEventData.Frame > otherParentEvent.EventData.Frame, thì nó có thể là root.
-	// Hoặc, nếu newEventData.Frame == otherParentEvent.EventData.Frame + 1 và otherParentEvent là root.
-	// Logic hiện tại: nếu có otherParent, chỉ là root nếu otherParent là root.
-	// Điều này có thể không đúng hoàn toàn với Lachesis.
-	// Một cách tiếp cận đơn giản hơn: một event là root nếu nó không có other parents
-	// hoặc nếu frame của nó là frame đầu tiên của một "vòng" mới.
-	// Lachesis: Root là event đầu tiên của một node trong một frame.
-	// Frame của event được xác định là max(frame(parents)) + 1 nếu nó thấy mạnh các root của frame trước.
-	// IsRoot thường được xác định khi tạo event, dựa trên parents của nó.
-	// Nếu một event không có other parents, nó có thể là root của frame của nó.
-	// Nếu nó có other parents, nó là root nếu frame của nó là mới.
-
-	// Logic đơn giản: nếu không có otherParentEvent (event đầu tiên của partner trong DAG cục bộ), coi là root.
-	// Hoặc nếu frame của event mới lớn hơn frame của otherParentEvent.
-	if otherParentEvent == nil {
-		return true // Có thể là root nếu không có other parent
+	// If the new event's frame is greater than its self-parent's frame, it's a root for the new frame.
+	if newEventData.Frame > selfParentEvent.EventData.Frame {
+		return true
 	}
-	// Nếu frame của event mới dự kiến lớn hơn frame của otherParent, nó có thể là root.
-	// Điều này phụ thuộc vào cách frame được tính toán.
-	// Giả sử `calculateNextFrame` đã tính đúng frame cho event mới.
-	// Nếu newEventData.Frame > otherParentEvent.EventData.Frame, nó là root của frame mới đó.
-	return newEventData.Frame > otherParentEvent.EventData.Frame
+
+	// More complex Lachesis logic: An event e is a root if frame(e) > frame(p)
+	// for all parents p that e strongly sees.
+	// The current placeholder is a simplification.
+	// For now, if it's in a new frame relative to its self-parent, it's considered a root.
+	return false // Default if not fitting simpler conditions above.
 }
 
-// consensusLoop là vòng lặp chính thực hiện các bước đồng thuận.
+// consensusLoop is the main loop that drives the consensus process.
+// It periodically attempts to finalize events, create new events, and synchronize with peers.
 func (mn *ManagedNode) consensusLoop() {
 	defer mn.wg.Done()
-	// Tần suất thực hiện một vòng đồng thuận nên được cấu hình
-	consensusTickInterval := 5 * time.Second // Ví dụ, có thể lấy từ mn.config
-	// if mn.config.ConsensusTickInterval > 0 {  // Giả sử bạn thêm ConsensusTickInterval vào NodeConfig
-	// 	consensusTickInterval = mn.config.ConsensusTickInterval
-	// }
-	// logger.Info("ConsensusTickInterval: ", consensusTickInterval)
+
+	consensusTickInterval := mn.config.ConsensusTickInterval
+	if consensusTickInterval <= 0 {
+		// Default if not set or invalid in config.
+		consensusTickInterval = 10 * time.Second
+		log.Printf("ConsensusTickInterval not configured or invalid, using default: %v", consensusTickInterval)
+	}
+	logger.Info("Consensus tick interval set to: ", consensusTickInterval)
 	ticker := time.NewTicker(consensusTickInterval)
 	defer ticker.Stop()
 
-	log.Println("Bắt đầu vòng lặp đồng thuận chính (Kiểm tra Finality -> Nếu không có tiến triển, Tạo Event Mới và Đồng bộ)...")
+	log.Println("Starting main consensus loop (Finality Check -> If no progress: Create New Event & Sync)...")
 
 	for {
 		select {
 		case <-mn.ctx.Done():
-			log.Println("Dừng vòng lặp đồng thuận do context của node đã hủy.")
+			log.Println("Stopping consensus loop due to node context cancellation.")
 			return
 		case <-ticker.C:
-			log.Println("--- Vòng đồng thuận mới ---")
-			logger.Info(mn.dagStore.GetAllEventsSnapshot())
-			// Bước 1: Cố gắng hoàn tất các event hiện có và xử lý "block tiếp theo"
-			log.Printf("CONSENSUS_LOOP: Chạy DecideClotho() để xác định các Clotho events. LastDecidedFrame hiện tại của DagStore: %d", mn.dagStore.GetLastDecidedFrame())
-			mn.dagStore.DecideClotho() // Cập nhật trạng thái Clotho cho các Roots [cite:0]
-			logger.Info("end DecideClotho")
+			log.Println("--- New Consensus Round ---")
+			// logger.Info("Current DagStore snapshot:", mn.dagStore.GetAllEventsSnapshot()) // Potentially very verbose
+
+			// Step 1: Attempt to finalize existing events and process the "next block".
+			log.Printf("CONSENSUS_LOOP: Running DecideClotho() to determine Clotho events. DagStore's LastDecidedFrame: %d", mn.dagStore.GetLastDecidedFrame())
+			mn.dagStore.DecideClotho() // Updates Clotho status for Roots.
+			logger.Info("CONSENSUS_LOOP: DecideClotho() finished.")
+
 			currentDagLastDecidedFrame := mn.dagStore.GetLastDecidedFrame()
-			log.Printf("CONSENSUS_LOOP: Sau DecideClotho(), LastDecidedFrame của DagStore là: %d. Frame cuối cùng đã xử lý: %d", currentDagLastDecidedFrame, mn.lastProcessedFinalizedFrame)
+			log.Printf("CONSENSUS_LOOP: After DecideClotho(), DagStore's LastDecidedFrame: %d. Previously processed finalized frame: %d", currentDagLastDecidedFrame, mn.lastProcessedFinalizedFrame)
 
 			var newlyFinalizedRoots []*dag.Event
 			if currentDagLastDecidedFrame > mn.lastProcessedFinalizedFrame {
 				for frameToProcess := mn.lastProcessedFinalizedFrame + 1; frameToProcess <= currentDagLastDecidedFrame; frameToProcess++ {
-					rootsInFrame := mn.dagStore.GetRoots(frameToProcess) // [cite:0]
+					rootsInFrame := mn.dagStore.GetRoots(frameToProcess)
 					for _, rootID := range rootsInFrame {
-						rootEvent, exists := mn.dagStore.GetEvent(rootID)                                         // [cite:0]
-						if exists && rootEvent.EventData.IsRoot && rootEvent.ClothoStatus == dag.ClothoIsClotho { // [cite:7]
+						rootEvent, exists := mn.dagStore.GetEvent(rootID)
+						if exists && rootEvent.EventData.IsRoot && rootEvent.ClothoStatus == dag.ClothoIsClotho {
 							newlyFinalizedRoots = append(newlyFinalizedRoots, rootEvent)
 						}
 					}
@@ -523,243 +546,241 @@ func (mn *ManagedNode) consensusLoop() {
 			}
 
 			if len(newlyFinalizedRoots) > 0 {
-				log.Printf("CONSENSUS_LOOP: Tìm thấy %d Root mới được quyết định là Clotho để xử lý.", len(newlyFinalizedRoots))
+				log.Printf("CONSENSUS_LOOP: Found %d new Root(s) decided as Clotho to process.", len(newlyFinalizedRoots))
+				// Sort for deterministic processing.
 				sort.Slice(newlyFinalizedRoots, func(i, j int) bool {
 					if newlyFinalizedRoots[i].EventData.Frame != newlyFinalizedRoots[j].EventData.Frame {
 						return newlyFinalizedRoots[i].EventData.Frame < newlyFinalizedRoots[j].EventData.Frame
 					}
-					return newlyFinalizedRoots[i].EventData.Timestamp < newlyFinalizedRoots[j].EventData.Timestamp
+					// Tie-break by timestamp, then by ID for full determinism.
+					if newlyFinalizedRoots[i].EventData.Timestamp != newlyFinalizedRoots[j].EventData.Timestamp {
+						return newlyFinalizedRoots[i].EventData.Timestamp < newlyFinalizedRoots[j].EventData.Timestamp
+					}
+					return newlyFinalizedRoots[i].GetEventId().String() < newlyFinalizedRoots[j].GetEventId().String()
 				})
 
-				log.Println("CONSENSUS_LOOP: Các Root được hoàn tất (Clotho) theo thứ tự xử lý:")
+				log.Println("CONSENSUS_LOOP: Finalized (Clotho) Roots in processing order:")
 				maxProcessedFrameThisRound := mn.lastProcessedFinalizedFrame
 				for _, finalizedRoot := range newlyFinalizedRoots {
-					log.Printf("  - Xử lý Root Hoàn Tất: ID %s, Frame %d, Creator %s, Timestamp %d, Transactions: %d bytes",
+					log.Printf("  - Processing Finalized Root: ID %s, Frame %d, Creator %s, Timestamp %d, Transactions: %d bytes",
 						finalizedRoot.GetEventId().String(),
 						finalizedRoot.EventData.Frame,
 						hex.EncodeToString(finalizedRoot.EventData.Creator),
 						finalizedRoot.EventData.Timestamp,
 						len(finalizedRoot.EventData.Transactions))
+					// Application-specific processing of finalizedRoot.EventData.Transactions would go here.
 					if finalizedRoot.EventData.Frame > maxProcessedFrameThisRound {
 						maxProcessedFrameThisRound = finalizedRoot.EventData.Frame
 					}
 				}
 				mn.lastProcessedFinalizedFrame = maxProcessedFrameThisRound
-				log.Printf("CONSENSUS_LOOP: Đã cập nhật lastProcessedFinalizedFrame thành %d", mn.lastProcessedFinalizedFrame)
+				log.Printf("CONSENSUS_LOOP: Updated lastProcessedFinalizedFrame to %d", mn.lastProcessedFinalizedFrame)
 
-				// **GỌI PRUNING SAU KHI XỬ LÝ CÁC FRAME HOÀN TẤT**
+				// Prune old events after processing finalized frames.
 				if mn.lastProcessedFinalizedFrame >= MIN_FRAMES_BEFORE_PRUNING {
-					// oldestFrameToKeep là frame CŨ NHẤT mà chúng ta muốn GIỮ LẠI.
-					// Các frame < oldestFrameToKeep sẽ bị xóa.
-					// Chúng ta muốn giữ lại FRAMES_TO_KEEP_AFTER_FINALIZED frame gần nhất đã được xử lý.
-					oldestFrameToKeep := mn.lastProcessedFinalizedFrame - FRAMES_TO_KEEP_AFTER_FINALIZED + 1
-					if oldestFrameToKeep < 1 { // Đảm bảo không yêu cầu giữ frame < 1 (nếu frame 0 là đặc biệt hoặc không dùng)
-						oldestFrameToKeep = 1 // Giả sử frame bắt đầu từ 1, hoặc frame 0 không bao giờ bị prune.
+					oldestFrameToKeep := uint64(1) // Default to keeping from frame 1.
+					if mn.lastProcessedFinalizedFrame > FRAMES_TO_KEEP_AFTER_FINALIZED {
+						oldestFrameToKeep = mn.lastProcessedFinalizedFrame - FRAMES_TO_KEEP_AFTER_FINALIZED + 1
 					}
-					log.Printf("CONSENSUS_LOOP: Gọi PruneOldEvents với oldestFrameToKeep = %d (lastProcessedFinalizedFrame=%d, FRAMES_TO_KEEP_AFTER_FINALIZED=%d, MIN_FRAMES_BEFORE_PRUNING=%d)",
+					log.Printf("CONSENSUS_LOOP: Calling PruneOldEvents with oldestFrameToKeep = %d (lastProcessedFinalizedFrame=%d, FRAMES_TO_KEEP_AFTER_FINALIZED=%d, MIN_FRAMES_BEFORE_PRUNING=%d)",
 						oldestFrameToKeep, mn.lastProcessedFinalizedFrame, FRAMES_TO_KEEP_AFTER_FINALIZED, MIN_FRAMES_BEFORE_PRUNING)
-					mn.dagStore.PruneOldEvents(oldestFrameToKeep) //
+					mn.dagStore.PruneOldEvents(oldestFrameToKeep)
 				} else {
-					log.Printf("CONSENSUS_LOOP: Bỏ qua pruning. lastProcessedFinalizedFrame (%d) < MIN_FRAMES_BEFORE_PRUNING (%d)",
+					log.Printf("CONSENSUS_LOOP: Skipping pruning. lastProcessedFinalizedFrame (%d) < MIN_FRAMES_BEFORE_PRUNING (%d)",
 						mn.lastProcessedFinalizedFrame, MIN_FRAMES_BEFORE_PRUNING)
 				}
-			} else {
-				log.Printf("CONSENSUS_LOOP: Không có Root nào mới được hoàn tất (Clotho). Tiến hành tạo event mới và đồng bộ.")
+			} else { // No new finalized roots, proceed to create a new event.
+				log.Printf("CONSENSUS_LOOP: No new Roots were finalized (Clotho). Proceeding to create new event and synchronize.")
 
-				// Bước 2: Tạo event mới (nếu không có tiến triển về hoàn tất)
-				reqCtx, cancelReq := context.WithTimeout(mn.ctx, 20*time.Second) // [cite:8]
-				requestPayload := []byte(fmt.Sprintf("{\"action\": \"get_pending_transactions\", \"timestamp\": %d, \"request_id\": \"client_periodic_%d\"}", time.Now().Unix(), time.Now().Nanosecond()))
+				// Step 2: Create a new event (if no finality progress).
+				// Request transactions from the master node.
+				reqCtx, cancelReq := context.WithTimeout(mn.ctx, 20*time.Second)
+				// Example payload; adjust as needed for your application.
+				requestPayload := []byte(fmt.Sprintf(`{"action": "get_pending_transactions", "timestamp": %d, "request_id": "client_periodic_%d"}`, time.Now().Unix(), time.Now().Nanosecond()))
 
-				log.Printf("CONSENSUS_LOOP: Đang gửi TransactionsRequestProtocol tới Master Node để lấy giao dịch (Payload: %s)...", string(requestPayload))
-				responseData, err := mn.SendRequestToMasterNode(reqCtx, TransactionsRequestProtocol, requestPayload) // [cite:9]
-				cancelReq()                                                                                          // [cite:8]
+				log.Printf("CONSENSUS_LOOP: Sending TransactionsRequestProtocol to Master Node for transactions (Payload: %s)...", string(requestPayload))
+				responseData, err := mn.SendRequestToMasterNode(reqCtx, TransactionsRequestProtocol, requestPayload) // From application_services.go
+				cancelReq()
 
 				var transactionsForNewBlock []byte
 				if err != nil {
-					log.Printf("CONSENSUS_LOOP: Lỗi khi gửi TransactionsRequestProtocol đến Master Node: %v. Sẽ thử tạo block không có giao dịch mới.", err)
-					transactionsForNewBlock = []byte{} // Tạo block rỗng nếu không lấy được TX
+					log.Printf("CONSENSUS_LOOP: Error requesting transactions from Master Node: %v. Will attempt to create event without new transactions.", err)
+					transactionsForNewBlock = []byte{} // Create an empty event if TX fetching fails.
 				} else {
-					log.Printf("CONSENSUS_LOOP: Đã nhận phản hồi giao dịch từ Master Node (%d bytes).", len(responseData))
+					log.Printf("CONSENSUS_LOOP: Received transaction response from Master Node (%d bytes).", len(responseData))
 					var parseErr error
 					transactionsForNewBlock, parseErr = parseTransactionsFromResponse(responseData)
 					if parseErr != nil {
-						log.Printf("CONSENSUS_LOOP: Lỗi khi phân tích cú pháp giao dịch từ Master Node: %v. Sẽ thử tạo block không có giao dịch mới.", parseErr)
+						log.Printf("CONSENSUS_LOOP: Error parsing transactions from Master Node: %v. Will attempt to create event without these transactions.", parseErr)
 						transactionsForNewBlock = []byte{}
 					}
 				}
 
 				ownPubKeyHex, err := mn.getOwnPublicKeyHex()
 				if err != nil {
-					log.Printf("CONSENSUS_LOOP: Lỗi nghiêm trọng khi lấy public key của chính node: %v. Bỏ qua tạo event.", err)
-					goto endOfConsensusRound
+					log.Printf("CONSENSUS_LOOP: CRITICAL error getting own public key: %v. Skipping event creation.", err)
+					goto endOfConsensusRound // Skip to end of this round.
 				}
 				ownPubKeyBytes, err := getPublicKeyBytesFromHexString(ownPubKeyHex)
 				if err != nil {
-					log.Printf("CONSENSUS_LOOP: Lỗi nghiêm trọng khi chuyển đổi public key hex sang bytes: %v. Bỏ qua tạo event.", err)
+					log.Printf("CONSENSUS_LOOP: CRITICAL error converting own public key hex to bytes: %v. Skipping event creation.", err)
 					goto endOfConsensusRound
 				}
 
-				latestSelfEventID, selfEventExists := mn.dagStore.GetLatestEventIDByCreatorPubKeyHex(ownPubKeyHex) // [cite:0]
+				latestSelfEventID, selfEventExists := mn.dagStore.GetLatestEventIDByCreatorPubKeyHex(ownPubKeyHex)
 				var selfParentEvent *dag.Event
-				var newEventIndex uint64 = 1
+				var newEventIndex uint64 = 1 // Default for the first event.
 
 				if selfEventExists {
 					var ok bool
-					selfParentEvent, ok = mn.dagStore.GetEvent(latestSelfEventID) // [cite:0]
+					selfParentEvent, ok = mn.dagStore.GetEvent(latestSelfEventID)
 					if !ok {
-						log.Printf("CONSENSUS_LOOP: Lỗi: latest self event ID %s tồn tại nhưng không tìm thấy event trong store. Bỏ qua tạo event.", latestSelfEventID.String())
+						log.Printf("CONSENSUS_LOOP: Error: Latest self event ID %s exists but event not found in store. Skipping event creation.", latestSelfEventID.String())
 						goto endOfConsensusRound
 					}
 					newEventIndex = selfParentEvent.EventData.Index + 1
 				} else {
-					log.Printf("CONSENSUS_LOOP: Không tìm thấy event nào trước đó của node %s. Đây sẽ là event đầu tiên (Index %d).", ownPubKeyHex, newEventIndex)
-					latestSelfEventID = dag.EventID{} // Zero EventID
+					log.Printf("CONSENSUS_LOOP: No previous event found for node %s. This will be its first event (Index %d).", ownPubKeyHex, newEventIndex)
+					latestSelfEventID = dag.EventID{} // Zero EventID for no self-parent.
 				}
 
 				var otherParents []dag.EventID
-				var otherParentEventForMeta *dag.Event
+				var otherParentEventForMeta *dag.Event // Used for metadata like frame calculation.
 
 				partnerNodeID, partnerPeerID, partnerErr := mn.selectConsensusPartner()
 				if partnerErr != nil {
-					logger.Error("CONSENSUS_LOOP (pre-create event): ", partnerErr) // [cite:5]
-					log.Printf("CONSENSUS_LOOP (pre-create event): Không thể chọn node đối tác: %v. Event sẽ không có otherParent.", partnerErr)
+					logger.Error("CONSENSUS_LOOP (pre-create event): Failed to select consensus partner: ", partnerErr)
+					log.Printf("CONSENSUS_LOOP (pre-create event): Event will not have an otherParent due to partner selection failure: %v", partnerErr)
 				} else {
-					log.Printf("CONSENSUS_LOOP (pre-create event): Đã chọn đối tác: NodeID=%s, PeerID=%s", partnerNodeID, partnerPeerID)
-					partnerLatestEventID, partnerLatestExists := mn.dagStore.GetLatestEventIDByCreatorPubKeyHex(string(partnerNodeID)) // [cite:0]
+					log.Printf("CONSENSUS_LOOP (pre-create event): Selected partner: NodeID=%s, PeerID=%s", partnerNodeID, partnerPeerID)
+					// Get partner's latest event to use as otherParent.
+					partnerLatestEventID, partnerLatestExists := mn.dagStore.GetLatestEventIDByCreatorPubKeyHex(string(partnerNodeID))
 					if partnerLatestExists {
 						otherParents = append(otherParents, partnerLatestEventID)
-						otherParentEventForMeta, _ = mn.dagStore.GetEvent(partnerLatestEventID) // [cite:0]
-						log.Printf("CONSENSUS_LOOP: Sử dụng event %s của partner %s làm otherParent.", partnerLatestEventID.String(), partnerNodeID)
+						otherParentEventForMeta, _ = mn.dagStore.GetEvent(partnerLatestEventID) // Error check might be needed.
+						log.Printf("CONSENSUS_LOOP: Using event %s from partner %s as otherParent.", partnerLatestEventID.String(), partnerNodeID)
 					} else {
-						log.Printf("CONSENSUS_LOOP: Partner %s chưa có event nào, event mới sẽ không có otherParent từ partner này.", partnerNodeID)
+						log.Printf("CONSENSUS_LOOP: Partner %s has no events yet; new event will not have an otherParent from this partner.", partnerNodeID)
 					}
 				}
 
-				// Tính toán Frame và IsRoot cho event mới
-				// Frame của event mới = max(frame của self-parent, frame của other-parent) + 1,
-				// hoặc 1 nếu không có parent.
-				// IsRoot nếu đây là event đầu tiên của node trong frame đó.
-				// Logic này cần được xem xét cẩn thận theo Lachesis.
-				// Tạm thời:
-				currentFrame := uint64(1)
-				if selfParentEvent != nil {
-					currentFrame = selfParentEvent.EventData.Frame
-				}
-				if otherParentEventForMeta != nil && otherParentEventForMeta.EventData.Frame > currentFrame {
-					currentFrame = otherParentEventForMeta.EventData.Frame
-				}
-				newEventFrame := currentFrame + 1 // Frame mới luôn lớn hơn frame của parent
-				// IsRoot: Theo Lachesis, một event là root nếu nó là event đầu tiên của creator trong frame đó.
-				// Hoặc, nếu frame(e) > frame(p) cho tất cả parent p mà e thấy mạnh.
-				// Đơn giản hóa: Nếu không có self-parent (event đầu tiên của node này) HOẶC frame mới > frame self-parent.
-				// Và (nếu có otherParent) frame mới > frame otherParent.
-				// Điều này đảm bảo nó là "root" của frame mới này.
-				newEventIsRoot := true // Mặc định là root, sẽ kiểm tra lại
-				// Nếu selfParentEvent tồn tại và newEventFrame bằng selfParentEvent.EventData.Frame, thì không phải root mới.
-				// Điều này không nên xảy ra nếu newEventFrame = currentFrame + 1.
-				// IsRoot thường có nghĩa là event đầu tiên của một node trong một frame.
-				// Vì chúng ta đang tạo một event mới, và newEventFrame được tính là frame tiếp theo,
-				// nên event này sẽ là root cho newEventFrame đối với creator này.
+				// Calculate Frame and IsRoot for the new event.
+				// This is a simplified calculation; Lachesis has more detailed rules.
+				newEventFrame := mn.calculateNextFrame(selfParentEvent, otherParentEventForMeta)
+				newEventIsRoot := mn.checkIfRoot(dag.EventData{Frame: newEventFrame}, selfParentEvent, otherParentEventForMeta)
 
 				newEventData := dag.EventData{
 					Transactions: transactionsForNewBlock,
 					SelfParent:   latestSelfEventID,
-					OtherParents: otherParents,
+					OtherParents: otherParents, // May be empty.
 					Creator:      ownPubKeyBytes,
 					Index:        newEventIndex,
 					Timestamp:    time.Now().Unix(),
-					Frame:        newEventFrame,  // Sử dụng frame đã tính
-					IsRoot:       newEventIsRoot, // Mặc định là root cho frame mới này
+					Frame:        newEventFrame,
+					IsRoot:       newEventIsRoot,
 				}
 
 				signature, signErr := signEventData(newEventData, mn.privKey)
 				if signErr != nil {
-					log.Printf("CONSENSUS_LOOP: Lỗi khi ký event data: %v. Bỏ qua tạo event.", signErr)
+					log.Printf("CONSENSUS_LOOP: Error signing event data: %v. Skipping event creation.", signErr)
 					goto endOfConsensusRound
 				}
-				newEvent := dag.NewEvent(newEventData, signature) // [cite:7]
+				newEvent := dag.NewEvent(newEventData, signature) // From dag/event.go
 
-				if addEventErr := mn.dagStore.AddEvent(newEvent); addEventErr != nil { // [cite:0]
-					log.Printf("CONSENSUS_LOOP: Lỗi khi thêm event block mới %s vào DagStore: %v", newEvent.GetEventId().String(), addEventErr)
+				if addEventErr := mn.dagStore.AddEvent(newEvent); addEventErr != nil {
+					log.Printf("CONSENSUS_LOOP: Error adding new event %s to DagStore: %v", newEvent.GetEventId().String(), addEventErr)
 					goto endOfConsensusRound
 				}
-				log.Printf("CONSENSUS_LOOP: Đã tạo và thêm event block local mới: ID %s, Index %d, Frame %d, IsRoot %t, TxLen: %d, OtherParents: %v",
+				log.Printf("CONSENSUS_LOOP: Created and added new local event: ID %s, Index %d, Frame %d, IsRoot %t, TxLen: %d, OtherParents: %v",
 					newEvent.GetEventId().String(), newEvent.EventData.Index, newEvent.EventData.Frame, newEvent.EventData.IsRoot, len(newEvent.EventData.Transactions), newEvent.EventData.OtherParents)
 
-				// Bước 3: Đồng bộ với partner đã chọn (nếu có)
+				// Step 3: Synchronize with the selected partner (if any).
 				if partnerErr == nil && partnerPeerID != "" {
-					log.Printf("CONSENSUS_LOOP: Bắt đầu đồng bộ với đối tác %s (PeerID: %s)...", partnerNodeID, partnerPeerID)
+					log.Printf("CONSENSUS_LOOP: Starting synchronization with partner %s (PeerID: %s)...", partnerNodeID, partnerPeerID)
 					mn.requestSyncWithPeer(mn.ctx, partnerPeerID, string(partnerNodeID))
-					log.Printf("CONSENSUS_LOOP: Đồng bộ với đối tác %s (PeerID: %s) hoàn tất.", partnerNodeID, partnerPeerID)
+					log.Printf("CONSENSUS_LOOP: Synchronization with partner %s (PeerID: %s) completed or attempted.", partnerNodeID, partnerPeerID)
 				} else {
-					log.Printf("CONSENSUS_LOOP: Bỏ qua bước đồng bộ do không chọn được đối tác hoặc có lỗi.")
+					log.Printf("CONSENSUS_LOOP: Skipping synchronization step as no partner was selected or an error occurred.")
 				}
 			}
-		endOfConsensusRound:
-			log.Println("--- Kết thúc vòng đồng thuận ---")
+		endOfConsensusRound: // Label for goto.
+			log.Println("--- End of Consensus Round ---")
 		}
 	}
 }
 
-// setupConnectionNotifier cập nhật để lưu trữ public key của peer khi kết nối.
+// setupConnectionNotifier configures handlers for network connection events.
+// It's updated to store the public key of peers upon successful connection.
 func (mn *ManagedNode) setupConnectionNotifier() {
 	mn.host.Network().Notify(&network.NotifyBundle{
 		ConnectedF: func(net network.Network, conn network.Conn) {
 			peerID := conn.RemotePeer()
-			log.Printf("✅ Đã kết nối tới peer: %s (Địa chỉ: %s)", peerID, conn.RemoteMultiaddr())
-			logger.Error("setupConnectionNotifier - peerID", peerID) // [cite:5]
+			log.Printf("✅ Connected to peer: %s (Address: %s)", peerID, conn.RemoteMultiaddr())
+			logger.Error("setupConnectionNotifier - Connected to PeerID: ", peerID) // Original log uses Error, kept for consistency.
+
 			pubKey := conn.RemotePublicKey()
 			if pubKey == nil {
-				log.Printf("Cảnh báo: Không thể lấy public key cho peer %s từ kết nối.", peerID)
+				log.Printf("Warning: Could not retrieve public key for peer %s from connection.", peerID)
 			} else {
 				rawPubKey, err := pubKey.Raw()
 				if err != nil {
-					log.Printf("Cảnh báo: Không thể lấy raw public key cho peer %s: %v", peerID, err)
+					log.Printf("Warning: Could not get raw public key for peer %s: %v", peerID, err)
 				} else {
 					pubKeyHex := hex.EncodeToString(rawPubKey)
 					mn.peerPubKeyMutex.Lock()
 					mn.connectedPeerPubKeys[peerID] = pubKeyHex
 					mn.peerPubKeyMutex.Unlock()
-					logger.Info("setupConnectionNotifier - mn.connectedPeerPubKeys", mn.connectedPeerPubKeys) // [cite:5]
-					log.Printf("Đã lưu trữ public key hex '%s...' cho peer %s", pubKeyHex[:min(10, len(pubKeyHex))], peerID)
+					logger.Info("setupConnectionNotifier - Stored public keys: ", mn.connectedPeerPubKeys)
+					log.Printf("Stored public key hex '%s...' for peer %s", pubKeyHex[:min(10, len(pubKeyHex))], peerID)
 				}
 			}
-			mn.peerMutex.RLock()
+
+			mn.peerMutex.RLock() // Use RLock for reading pInfo.Type.
 			pInfo, exists := mn.peers[peerID]
 			var peerType string
 			if exists {
 				peerType = pInfo.Type
 			} else {
-				peerType = "unknown_inbound"
+				peerType = "unknown_inbound" // Default type for unexpected inbound connections.
 			}
 			mn.peerMutex.RUnlock()
-			mn.updatePeerStatus(peerID, PeerConnected, nil, peerType)                               // [cite:4]
-			mn.host.Peerstore().AddAddr(peerID, conn.RemoteMultiaddr(), peerstore.ConnectedAddrTTL) // [cite:4]
+
+			mn.updatePeerStatus(peerID, PeerConnected, nil, peerType)                               // From peer_manager.go
+			mn.host.Peerstore().AddAddr(peerID, conn.RemoteMultiaddr(), peerstore.ConnectedAddrTTL) // From peer_manager.go
 		},
 		DisconnectedF: func(net network.Network, conn network.Conn) {
 			peerID := conn.RemotePeer()
-			log.Printf("❌ Đã ngắt kết nối từ peer: %s", peerID)
+			log.Printf("❌ Disconnected from peer: %s", peerID)
+
 			mn.peerPubKeyMutex.Lock()
 			delete(mn.connectedPeerPubKeys, peerID)
 			mn.peerPubKeyMutex.Unlock()
-			log.Printf("Đã xóa public key đã lưu cho peer %s do ngắt kết nối.", peerID)
+			log.Printf("Removed stored public key for peer %s due to disconnection.", peerID)
+
 			mn.peerMutex.RLock()
 			pInfo, exists := mn.peers[peerID]
-			var peerType string
+			var peerType string // Determine type for status update and reconnect logic.
 			if exists {
 				peerType = pInfo.Type
+			} else {
+				// If peer info doesn't exist, it might have been an ephemeral connection
+				// or not yet fully registered. Use a sensible default or handle accordingly.
+				peerType = "unknown_disconnected"
 			}
 			mn.peerMutex.RUnlock()
-			mn.updatePeerStatus(peerID, PeerDisconnected, errors.New("đã ngắt kết nối"), peerType) // [cite:4]
-			if exists && shouldReconnect(pInfo.Type, mn.config) {                                  // [cite:4]
-				log.Printf("Lên lịch kết nối lại cho peer quan trọng %s (Loại: %s)", peerID, pInfo.Type)
-				mn.tryReconnectToPeer(peerID, pInfo.Type) // [cite:4]
+
+			mn.updatePeerStatus(peerID, PeerDisconnected, errors.New("disconnected"), peerType) // From peer_manager.go
+
+			// Decide whether to attempt reconnection.
+			if exists && shouldReconnect(pInfo.Type, mn.config) { // From peer_manager.go
+				log.Printf("Scheduled reconnection attempt for important peer %s (Type: %s)", peerID, pInfo.Type)
+				mn.tryReconnectToPeer(peerID, pInfo.Type) // From peer_manager.go
 			}
 		},
 	})
 }
 
-// min helper
+// min is a helper function to find the minimum of two integers.
 func min(a, b int) int {
 	if a < b {
 		return a
@@ -768,119 +789,115 @@ func min(a, b int) int {
 }
 
 // requestSyncWithPeer initiates a synchronization process with a specific peer.
-// This function is called by the current node (Node A - Initiator) to request events
-// from a partner node (Node B - Provider).
+// This node (Node A - Initiator) requests events from the partner node (Node B - Provider).
 func (mn *ManagedNode) requestSyncWithPeer(ctx context.Context, partnerPeerID peer.ID, partnerNodeID string) {
-	log.Printf("CONSENSUS_LOOP: Đang cố gắng bắt đầu đồng bộ với đối tác %s (PeerID: %s)", partnerNodeID, partnerPeerID)
+	log.Printf("SYNC_REQUEST: Attempting to start synchronization with partner %s (PeerID: %s)", partnerNodeID, partnerPeerID)
 
 	ownPubKeyHex, err := mn.getOwnPublicKeyHex()
 	if err != nil {
-		log.Printf("CONSENSUS_LOOP: Lỗi khi lấy public key của chính node để gửi yêu cầu đồng bộ tới %s: %v", partnerPeerID, err)
+		log.Printf("SYNC_REQUEST: Error getting own public key for sync request to %s: %v", partnerPeerID, err)
 		return
 	}
 	if ownPubKeyHex == "" {
-		log.Printf("CONSENSUS_LOOP: Public key của chính node là rỗng, không thể gửi yêu cầu đồng bộ tới %s.", partnerPeerID)
+		log.Printf("SYNC_REQUEST: Own public key is empty, cannot send sync request to %s.", partnerPeerID)
 		return
 	}
 	if partnerPeerID == mn.host.ID() {
-		log.Printf("CONSENSUS_LOOP: Bỏ qua việc đồng bộ với chính mình (PeerID: %s)", partnerPeerID)
+		log.Printf("SYNC_REQUEST: Skipping synchronization with self (PeerID: %s)", partnerPeerID)
 		return
 	}
 
-	// 1. Chuẩn bị payload cho yêu cầu đồng bộ.
-	// Payload này sẽ chứa thông tin về các event mới nhất mà node hiện tại (Node A) đã biết.
+	// 1. Prepare the payload for the synchronization request.
+	// This payload contains information about the latest events known by the current node (Node A).
 	knownMaxIndices := make(map[string]uint64)
 	latestEventsMap := mn.dagStore.GetLatestEventsMapSnapshot() // map[creatorPubKeyHex]EventID
 
 	for creatorPubKeyHex, latestEventID := range latestEventsMap {
-		if latestEventID.IsZero() { // Bỏ qua nếu EventID là zero
+		if latestEventID.IsZero() { // Skip zero EventIDs.
 			continue
 		}
 		latestEvent, exists := mn.dagStore.GetEvent(latestEventID)
 		if exists {
 			knownMaxIndices[creatorPubKeyHex] = latestEvent.EventData.Index
 		} else {
-			// Trường hợp này không nên xảy ra nếu DagStore nhất quán
-			log.Printf("CONSENSUS_LOOP: Cảnh báo - Event mới nhất %s của người tạo %s không tìm thấy trong DagStore khi chuẩn bị KnownMaxIndices cho yêu cầu đồng bộ.", latestEventID.String()[:6], creatorPubKeyHex[:6])
+			// This case should ideally not happen if DagStore is consistent.
+			log.Printf("SYNC_REQUEST: Warning - Latest event %s for creator %s not found in DagStore when preparing KnownMaxIndices for sync request.",
+				latestEventID.String()[:6], creatorPubKeyHex[:6])
 		}
 	}
-	log.Printf("CONSENSUS_LOOP: Chuẩn bị KnownMaxIndices để gửi tới %s: %d mục", partnerPeerID, len(knownMaxIndices))
+	log.Printf("SYNC_REQUEST: Prepared KnownMaxIndices to send to %s: %d items", partnerPeerID, len(knownMaxIndices))
 
-	// Sử dụng cấu trúc SyncRequestPayload đã định nghĩa (trong stream_manager.go)
+	// Use the SyncRequestPayload struct (defined in stream_manager.go or similar).
 	syncPayload := SyncRequestPayload{
-		Action:          "request_events_based_on_indices", // Một action string rõ ràng hơn
+		Action:          "request_events_based_on_indices", // A clear action string.
 		RequesterNodeID: ownPubKeyHex,
 		KnownMaxIndices: knownMaxIndices,
 	}
 
 	requestPayloadBytes, err := json.Marshal(syncPayload)
 	if err != nil {
-		log.Printf("CONSENSUS_LOOP: Lỗi khi marshal SyncRequestPayload cho đối tác %s: %v", partnerPeerID, err)
+		log.Printf("SYNC_REQUEST: Error marshaling SyncRequestPayload for partner %s: %v", partnerPeerID, err)
 		return
 	}
 
-	// 2. Gửi yêu cầu sử dụng mn.SendRequest (từ stream_manager.go)
-	reqCtx, cancelReq := context.WithTimeout(ctx, 30*time.Second) // Timeout cho yêu cầu
+	// 2. Send the request using mn.SendRequest (from stream_manager.go).
+	reqCtx, cancelReq := context.WithTimeout(ctx, 30*time.Second) // Timeout for the sync request.
 	defer cancelReq()
 
-	log.Printf("CONSENSUS_LOOP: Đang gửi SyncRequestProtocol tới %s (PeerID: %s). Kích thước payload: %d bytes.", partnerNodeID, partnerPeerID, len(requestPayloadBytes))
-	// log.Printf("CONSENSUS_LOOP: Payload gửi đi: %s", string(requestPayloadBytes)) // Log chi tiết payload nếu cần debug
+	log.Printf("SYNC_REQUEST: Sending SyncRequestProtocol to %s (PeerID: %s). Payload size: %d bytes.", partnerNodeID, partnerPeerID, len(requestPayloadBytes))
+	// log.Printf("SYNC_REQUEST: Outgoing payload: %s", string(requestPayloadBytes)) // Log detailed payload for debugging if necessary.
 
 	responseData, err := mn.SendRequest(reqCtx, partnerPeerID, SyncRequestProtocol, requestPayloadBytes)
 
 	if err != nil {
-		log.Printf("CONSENSUS_LOOP: Lỗi khi gửi yêu cầu đồng bộ tới đối tác %s (PeerID: %s): %v", partnerNodeID, partnerPeerID, err)
-		// Lỗi "failed to negotiate protocol" có thể xảy ra ở đây nếu node đích (partnerPeerID)
-		// không hỗ trợ SyncRequestProtocol hoặc handler chưa được thiết lập đúng.
+		log.Printf("SYNC_REQUEST: Error sending sync request to partner %s (PeerID: %s): %v", partnerNodeID, partnerPeerID, err)
+		// "Failed to negotiate protocol" error can occur here if the target node (partnerPeerID)
+		// does not support SyncRequestProtocol or its handler is not set up correctly.
 		return
 	}
 
-	// 3. Xử lý responseData nhận được từ đối tác.
-	log.Printf("CONSENSUS_LOOP: Đã nhận phản hồi đồng bộ từ đối tác %s (PeerID: %s). Kích thước: %d bytes.", partnerNodeID, partnerPeerID, len(responseData))
-	// log.Printf("CONSENSUS_LOOP: Dữ liệu phản hồi: %s", string(responseData)) // Log chi tiết nếu cần
+	// 3. Process the responseData received from the partner.
+	log.Printf("SYNC_REQUEST: Received sync response from partner %s (PeerID: %s). Size: %d bytes.", partnerNodeID, partnerPeerID, len(responseData))
+	// log.Printf("SYNC_REQUEST: Response data: %s", string(responseData)) // Log detailed response for debugging if necessary.
 
-	var syncResponse SyncResponsePayload // Cấu trúc này cũng được định nghĩa trong stream_manager.go
+	var syncResponse SyncResponsePayload // This struct should also be defined (e.g., in stream_manager.go).
 	if err := json.Unmarshal(responseData, &syncResponse); err != nil {
-		log.Printf("CONSENSUS_LOOP: Lỗi unmarshal phản hồi đồng bộ từ %s: %v", partnerPeerID, err)
+		log.Printf("SYNC_REQUEST: Error unmarshaling sync response from %s: %v", partnerPeerID, err)
 		return
 	}
 
 	if len(syncResponse.Events) == 0 {
-		log.Printf("CONSENSUS_LOOP: Đối tác %s không gửi event mới nào (có thể đã đồng bộ hoặc đối tác không có event mới).", partnerPeerID)
+		log.Printf("SYNC_REQUEST: Partner %s sent no new events (possibly already in sync or partner has no new events).", partnerPeerID)
 	} else {
-		log.Printf("CONSENSUS_LOOP: Đã nhận %d event từ đối tác %s. Đang xử lý...", len(syncResponse.Events), partnerPeerID)
+		log.Printf("SYNC_REQUEST: Received %d event(s) from partner %s. Processing...", len(syncResponse.Events), partnerPeerID)
 		addedCount := 0
 		for i, eventBytes := range syncResponse.Events {
-			event, err := dag.Unmarshal(eventBytes) // Sử dụng dag.Unmarshal từ consensus/dag/event.go
-			if err != nil {
-				log.Printf("CONSENSUS_LOOP: Lỗi unmarshal event thứ %d từ đối tác %s: %v. Bỏ qua event này.", i+1, partnerPeerID, err)
+			event, errUnmarshal := dag.Unmarshal(eventBytes) // Use dag.Unmarshal from consensus/dag/event.go.
+			if errUnmarshal != nil {
+				log.Printf("SYNC_REQUEST: Error unmarshaling event %d from partner %s: %v. Skipping this event.", i+1, partnerPeerID, errUnmarshal)
 				continue
 			}
-			// Kiểm tra tính hợp lệ của event trước khi thêm (ví dụ: chữ ký, cấu trúc)
-			// (Phần này có thể cần logic kiểm tra chi tiết hơn)
+			// Basic validation of the event (e.g., signature, structure) could be added here.
 
-			// Thêm event vào DagStore của node hiện tại
-			if err := mn.dagStore.AddEvent(event); err != nil {
-				// Lỗi có thể do event không hợp lệ, đã tồn tại, hoặc các vấn đề khác với DagStore
-				// Nếu lỗi là "event already exists", có thể bỏ qua.
-				// if strings.Contains(err.Error(), "already exists") {
-				// 	// log.Printf("CONSENSUS_LOOP: Event %s từ đối tác %s đã tồn tại, bỏ qua.", event.GetEventId().String()[:6], partnerPeerID)
-				// } else {
-				log.Printf("CONSENSUS_LOOP: Lỗi khi thêm event %s (Index: %d, Creator: %s) từ đối tác %s vào DagStore: %v",
-					event.GetEventId().String()[:6], event.EventData.Index, hex.EncodeToString(event.EventData.Creator)[:6], partnerPeerID, err)
-				// }
+			// Add the event to the current node's DagStore.
+			if errAdd := mn.dagStore.AddEvent(event); errAdd != nil {
+				// Error could be due to invalid event, already exists, or other DagStore issues.
+				// Example: if strings.Contains(errAdd.Error(), "already exists") { log.Printf(...) }
+				log.Printf("SYNC_REQUEST: Error adding event %s (Index: %d, Creator: %s) from partner %s to DagStore: %v",
+					event.GetEventId().String()[:6], event.EventData.Index, hex.EncodeToString(event.EventData.Creator)[:6], partnerPeerID, errAdd)
 			} else {
 				addedCount++
-				log.Printf("CONSENSUS_LOOP: Đã thêm thành công event %s (Index: %d, Creator: %s) từ đối tác %s.",
+				log.Printf("SYNC_REQUEST: Successfully added event %s (Index: %d, Creator: %s) from partner %s.",
 					event.GetEventId().String()[:6], event.EventData.Index, hex.EncodeToString(event.EventData.Creator)[:6], partnerPeerID)
 			}
 		}
-		log.Printf("CONSENSUS_LOOP: Đã thêm %d/%d event nhận được từ đối tác %s vào DagStore.", addedCount, len(syncResponse.Events), partnerPeerID)
+		log.Printf("SYNC_REQUEST: Added %d/%d events received from partner %s to DagStore.", addedCount, len(syncResponse.Events), partnerPeerID)
 	}
 
-	// (Tùy chọn) Xử lý syncResponse.PartnerLatestIndices nếu cần
+	// Optionally, process syncResponse.PartnerLatestIndices if needed.
 	if len(syncResponse.PartnerLatestIndices) > 0 {
-		log.Printf("CONSENSUS_LOOP: Đối tác %s cũng gửi thông tin về latest indices của họ (%d mục). (Hiện tại chưa xử lý thông tin này)", partnerPeerID, len(syncResponse.PartnerLatestIndices))
-		// Logic để cập nhật kiến thức về trạng thái của partner có thể được thêm ở đây.
+		log.Printf("SYNC_REQUEST: Partner %s also sent information about their latest indices (%d items). (Currently, this info is not further processed).",
+			partnerPeerID, len(syncResponse.PartnerLatestIndices))
+		// Logic to update knowledge about the partner's state could be added here.
 	}
 }

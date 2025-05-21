@@ -48,4 +48,4 @@ supportedProtocols:
 
 initialStake: 10
 
-consensusTickInterval: "15s"
+consensusTickInterval: "10s"

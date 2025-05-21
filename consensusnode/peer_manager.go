@@ -11,65 +11,72 @@ import (
 	"sync"
 	"time"
 
-	"github.com/blockchain/consensus/logger"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/peerstore"
+
+	"github.com/blockchain/consensus/logger" // Custom logger
 )
 
-// --- Thông tin và Trạng thái Peer ---
+// --- Peer Information and Status ---
 
-// PeerStatus đại diện cho trạng thái kết nối với một peer.
+// PeerStatus represents the connection status with a peer.
 type PeerStatus int
 
 const (
+	// PeerDisconnected indicates that the peer is not connected.
 	PeerDisconnected PeerStatus = iota
+	// PeerConnecting indicates that a connection attempt to the peer is in progress.
 	PeerConnecting
+	// PeerConnected indicates that the peer is successfully connected.
 	PeerConnected
+	// PeerFailed indicates that connection attempts to the peer have failed.
 	PeerFailed
 )
 
-// String trả về biểu diễn chuỗi của PeerStatus.
+// String returns a string representation of the PeerStatus.
 func (s PeerStatus) String() string {
 	switch s {
 	case PeerDisconnected:
-		return "Đã ngắt kết nối"
+		return "Disconnected"
 	case PeerConnecting:
-		return "Đang kết nối"
+		return "Connecting"
 	case PeerConnected:
-		return "Đã kết nối"
+		return "Connected"
 	case PeerFailed:
-		return "Thất bại"
+		return "Failed"
 	default:
-		return "Không xác định"
+		return "Unknown"
 	}
 }
 
-// ManagedPeerInfo chứa thông tin về một peer đã kết nối hoặc đã biết.
+// ManagedPeerInfo contains information about a known or connected peer.
 type ManagedPeerInfo struct {
-	ID                peer.ID
-	Addresses         []peer.AddrInfo // Sử dụng AddrInfo để có thể chứa nhiều địa chỉ
-	Type              string          // "master", "validator", v.v.
-	Status            PeerStatus
-	LastSeen          time.Time
-	LastError         error
+	ID        peer.ID
+	Addresses []peer.AddrInfo // Use AddrInfo to store multiple addresses.
+	Type      string          // Peer type, e.g., "master", "validator".
+	Status    PeerStatus
+	LastSeen  time.Time
+	LastError error
+	// ReconnectAttempts counts the number of consecutive failed reconnect attempts.
 	ReconnectAttempts int
-	cancelReconnect   context.CancelFunc // Hàm để hủy bỏ goroutine kết nối lại cho peer này
+	// cancelReconnect is a function to cancel an ongoing reconnection goroutine for this peer.
+	cancelReconnect context.CancelFunc
 }
 
-// --- Quản lý Peer ---
+// --- Peer Management ---
 
-// AddKnownPeer thêm một peer vào danh sách quản lý một cách tường minh, thường trước khi thử kết nối.
-// AddKnownPeer thêm một peer vào danh sách quản lý một cách tường minh, thường trước khi thử kết nối.
-// Hàm này cũng sẽ cố gắng trích xuất và lưu trữ PubKeyHex của peer vào mn.connectedPeerPubKeys.
+// AddKnownPeer explicitly adds a peer to the managed list, typically before attempting a connection.
+// This function also attempts to extract and store the peer's PubKeyHex in mn.connectedPeerPubKeys
+// if it can be derived from the provided address string.
 func (mn *ManagedNode) AddKnownPeer(peerAddrStr string, peerType string) error {
 	addrInfo, err := peer.AddrInfoFromString(peerAddrStr)
 	if err != nil {
-		return fmt.Errorf("địa chỉ peer không hợp lệ %s: %w", peerAddrStr, err)
+		return fmt.Errorf("invalid peer address string %s: %w", peerAddrStr, err)
 	}
 
-	// Trích xuất và lưu trữ PubKeyHex nếu có thể
-	if addrInfo.ID != "" { // Đảm bảo peer.ID tồn tại
+	// Attempt to extract and store PubKeyHex if available from the AddrInfo.
+	if addrInfo.ID != "" { // Ensure peer.ID exists.
 		pubKey, pkErr := addrInfo.ID.ExtractPublicKey()
 		if pkErr == nil && pubKey != nil {
 			rawPubKey, rawErr := pubKey.Raw()
@@ -78,84 +85,85 @@ func (mn *ManagedNode) AddKnownPeer(peerAddrStr string, peerType string) error {
 				mn.peerPubKeyMutex.Lock()
 				mn.connectedPeerPubKeys[addrInfo.ID] = pubKeyHex
 				mn.peerPubKeyMutex.Unlock()
-				log.Printf("AddKnownPeer: Đã thêm/cập nhật PubKeyHex cho PeerID %s", addrInfo.ID)
+				log.Printf("AddKnownPeer: Added/updated PubKeyHex for PeerID %s", addrInfo.ID)
 			} else {
-				log.Printf("AddKnownPeer: Lỗi khi lấy raw bytes từ PublicKey cho PeerID %s: %v", addrInfo.ID, rawErr)
+				log.Printf("AddKnownPeer: Error getting raw bytes from PublicKey for PeerID %s: %v", addrInfo.ID, rawErr)
 			}
 		} else {
-			log.Printf("AddKnownPeer: Không thể trích xuất PublicKey từ PeerID %s (địa chỉ: %s): %v", addrInfo.ID, peerAddrStr, pkErr)
+			// This can happen if the AddrInfo doesn't contain enough info to extract a public key,
+			// or if the key type is not supported for direct extraction.
+			log.Printf("AddKnownPeer: Could not extract PublicKey from PeerID %s (address: %s): %v", addrInfo.ID, peerAddrStr, pkErr)
 		}
 	} else {
-		log.Printf("AddKnownPeer: PeerID rỗng từ địa chỉ %s, không thể trích xuất public key.", peerAddrStr)
+		log.Printf("AddKnownPeer: PeerID is empty in AddrInfo from address %s, cannot extract public key.", peerAddrStr)
 	}
 
 	mn.peerMutex.Lock()
 	defer mn.peerMutex.Unlock()
 
 	if pInfo, exists := mn.peers[addrInfo.ID]; exists {
-		// Peer đã tồn tại, cập nhật thông tin nếu cần (ví dụ: loại, địa chỉ)
-		pInfo.Type = peerType // Cập nhật Type
-		// Logic để hợp nhất địa chỉ hoặc thay thế bằng địa chỉ mới nhất
-		pInfo.Addresses = []peer.AddrInfo{*addrInfo} // Đơn giản là thay thế địa chỉ
-		log.Printf("Đã cập nhật thông tin cho peer đã biết %s (Loại: %s, Địa chỉ: %s)", addrInfo.ID, peerType, addrInfo.Addrs)
+		// Peer already exists, update information if necessary (e.g., type, addresses).
+		pInfo.Type = peerType // Update Type.
+		// Logic to merge addresses or replace with the latest known address.
+		pInfo.Addresses = []peer.AddrInfo{*addrInfo} // Simplistic replacement of addresses.
+		log.Printf("Updated information for known peer %s (Type: %s, Address: %s)", addrInfo.ID, peerType, addrInfo.Addrs)
 	} else {
-		// Peer chưa tồn tại, tạo mới
+		// Peer does not exist, create a new entry.
 		mn.peers[addrInfo.ID] = &ManagedPeerInfo{
 			ID:        addrInfo.ID,
 			Addresses: []peer.AddrInfo{*addrInfo},
 			Type:      peerType,
-			Status:    PeerDisconnected, // Trạng thái ban đầu
+			Status:    PeerDisconnected, // Initial status.
 		}
-		log.Printf("Đã thêm peer đã biết %s (Loại: %s, Địa chỉ: %s)", addrInfo.ID, peerType, addrInfo.Addrs)
+		log.Printf("Added known peer %s (Type: %s, Address: %s)", addrInfo.ID, peerType, addrInfo.Addrs)
 	}
 	return nil
 }
 
-// connectToBootstrapPeers kết nối tới các bootstrap peer.
+// connectToBootstrapPeers attempts to connect to the configured bootstrap peers.
 func (mn *ManagedNode) connectToBootstrapPeers() error {
 	var connectWg sync.WaitGroup
 	bootstrapPeers := mn.config.BootstrapPeers
 	if len(bootstrapPeers) == 0 {
-		log.Println("Không có bootstrap peer nào được cấu hình.")
+		log.Println("No bootstrap peers configured.")
 		return nil
 	}
 
-	log.Printf("Đang kết nối tới %d bootstrap peer(s)...", len(bootstrapPeers))
+	log.Printf("Connecting to %d bootstrap peer(s)...", len(bootstrapPeers))
 	for _, peerAddrStr := range bootstrapPeers {
 		if peerAddrStr == "" {
 			continue
 		}
 		addr, err := peer.AddrInfoFromString(peerAddrStr)
 		if err != nil {
-			log.Printf("Địa chỉ bootstrap peer không hợp lệ %s: %v", peerAddrStr, err)
+			log.Printf("Invalid bootstrap peer address %s: %v", peerAddrStr, err)
 			continue
 		}
 		connectWg.Add(1)
 		go func(addrInfo peer.AddrInfo) {
 			defer connectWg.Done()
-			logger.Error("connectToBootstrapPeers: ", addrInfo)
-			if err := mn.ConnectToPeer(addrInfo, "bootstrap"); err != nil { // Mặc định loại là "bootstrap"
-				log.Printf("Không thể kết nối tới bootstrap peer %s: %v", addrInfo.ID, err)
+			logger.Error("connectToBootstrapPeers attempting to connect to: ", addrInfo) // Original code uses Error level.
+			// Assume "bootstrap" type for peers from this list.
+			if err := mn.ConnectToPeer(addrInfo, "bootstrap"); err != nil {
+				log.Printf("Failed to connect to bootstrap peer %s: %v", addrInfo.ID, err)
 			}
 		}(*addr)
 	}
 	connectWg.Wait()
-	logger.Info(mn.peers)
-	log.Println("Hoàn tất quá trình kết nối bootstrap peer.")
+	logger.Info("Bootstrap peer connection process completed. Current peers map:", mn.peers)
 	return nil
 }
 
-// ConnectToPeer thử kết nối tới một peer cụ thể.
+// ConnectToPeer attempts to establish a connection with a specific peer.
 func (mn *ManagedNode) ConnectToPeer(peerInfo peer.AddrInfo, peerType string) error {
 	if peerInfo.ID == mn.host.ID() {
-		log.Printf("Bỏ qua việc kết nối tới chính mình (%s)", peerInfo.ID)
+		log.Printf("Skipping connection attempt to self (%s)", peerInfo.ID)
 		return nil
 	}
 
-	// Trích xuất và lưu trữ PubKeyHex nếu có thể, trước khi lock mn.peerMutex
-	// setupConnectionNotifier sẽ làm điều này một lần nữa khi kết nối thành công,
-	// việc này đảm bảo pubkey có sẵn sớm hơn.
-	if peerInfo.ID != "" { // Đảm bảo peer.ID tồn tại
+	// Attempt to extract and store PubKeyHex before locking, ensuring it's available early.
+	// setupConnectionNotifier will also do this upon successful connection.
+	if peerInfo.ID != "" {
 		pubKey, pkErr := peerInfo.ID.ExtractPublicKey()
 		if pkErr == nil && pubKey != nil {
 			rawPubKey, rawErr := pubKey.Raw()
@@ -164,34 +172,35 @@ func (mn *ManagedNode) ConnectToPeer(peerInfo peer.AddrInfo, peerType string) er
 				mn.peerPubKeyMutex.Lock()
 				mn.connectedPeerPubKeys[peerInfo.ID] = pubKeyHex
 				mn.peerPubKeyMutex.Unlock()
-				log.Printf("ConnectToPeer: Đã thêm/cập nhật PubKeyHex cho PeerID %s trước khi kết nối", peerInfo.ID)
+				log.Printf("ConnectToPeer: Added/updated PubKeyHex for PeerID %s before connecting.", peerInfo.ID)
 			} else {
-				log.Printf("ConnectToPeer: Lỗi khi lấy raw bytes từ PublicKey cho PeerID %s: %v", peerInfo.ID, rawErr)
+				log.Printf("ConnectToPeer: Error getting raw bytes from PublicKey for PeerID %s: %v", peerInfo.ID, rawErr)
 			}
 		} else {
-			log.Printf("ConnectToPeer: Không thể trích xuất PublicKey từ PeerID %s: %v", peerInfo.ID, pkErr)
+			log.Printf("ConnectToPeer: Could not extract PublicKey from PeerID %s: %v", peerInfo.ID, pkErr)
 		}
 	} else if len(peerInfo.Addrs) > 0 {
-		log.Printf("ConnectToPeer: PeerID rỗng trong peerInfo cho địa chỉ %s, không thể trích xuất public key trước.", peerInfo.Addrs[0])
+		log.Printf("ConnectToPeer: PeerID is empty in peerInfo for address %s; cannot extract public key beforehand.", peerInfo.Addrs[0])
 	} else {
-		log.Printf("ConnectToPeer: PeerID rỗng và không có địa chỉ trong peerInfo, không thể trích xuất public key trước.")
+		log.Printf("ConnectToPeer: PeerID is empty and no addresses in peerInfo; cannot extract public key beforehand.")
 	}
 
 	mn.peerMutex.Lock()
-	if p, exists := mn.peers[peerInfo.ID]; exists {
+	p, exists := mn.peers[peerInfo.ID]
+	if exists {
 		if p.Status == PeerConnecting || p.Status == PeerConnected {
 			mn.peerMutex.Unlock()
-			// log.Printf("Đã kết nối hoặc đang kết nối tới peer %s", peerInfo.ID)
-			return nil // Đã có kết nối hoặc đang trong quá trình kết nối
+			// log.Printf("Already connected or connecting to peer %s", peerInfo.ID)
+			return nil // Already connected or connection in progress.
 		}
-		// Nếu peer đã tồn tại nhưng không ở trạng thái Connecting/Connected, cập nhật thông tin
-		p.Type = peerType                       // Cập nhật Type
-		p.Addresses = []peer.AddrInfo{peerInfo} // Cập nhật địa chỉ
+		// If peer exists but not in Connecting/Connected state, update its info.
+		p.Type = peerType
+		p.Addresses = []peer.AddrInfo{peerInfo} // Update address.
 		p.Status = PeerConnecting
-		p.LastError = nil       // Xóa lỗi cũ khi thử kết nối lại
-		p.ReconnectAttempts = 0 // Reset số lần thử lại
+		p.LastError = nil       // Clear previous error on new attempt.
+		p.ReconnectAttempts = 0 // Reset reconnect attempts.
 	} else {
-		// Peer chưa tồn tại, tạo mới
+		// Peer does not exist, create a new entry.
 		mn.peers[peerInfo.ID] = &ManagedPeerInfo{
 			ID:        peerInfo.ID,
 			Addresses: []peer.AddrInfo{peerInfo},
@@ -199,47 +208,53 @@ func (mn *ManagedNode) ConnectToPeer(peerInfo peer.AddrInfo, peerType string) er
 			Status:    PeerConnecting,
 		}
 	}
-	currentPeerInfo := mn.peers[peerInfo.ID] // Lấy thông tin peer vừa cập nhật/tạo
+	// Get a reference to the peer's info (either updated or newly created).
+	currentPeerInfo := mn.peers[peerInfo.ID]
 	mn.peerMutex.Unlock()
 
-	log.Printf("Đang thử kết nối tới peer %s (Loại: %s, Địa chỉ: %s)", currentPeerInfo.ID, currentPeerInfo.Type, currentPeerInfo.Addresses[0].Addrs)
-	// Thêm tất cả các địa chỉ đã biết của peer vào peerstore
-	// peerstore.PermanentAddrTTL đảm bảo địa chỉ không bị xóa sớm
+	log.Printf("Attempting to connect to peer %s (Type: %s, Address: %s)", currentPeerInfo.ID, currentPeerInfo.Type, currentPeerInfo.Addresses[0].Addrs)
+	// Add all known addresses of the peer to the peerstore.
+	// PermanentAddrTTL ensures addresses are not prematurely removed.
 	mn.host.Peerstore().AddAddrs(peerInfo.ID, peerInfo.Addrs, peerstore.PermanentAddrTTL)
 
-	// Sử dụng context của node cho việc kết nối
-	// Có thể tạo một context con với timeout nếu muốn kiểm soát thời gian kết nối
-	connectCtx, cancel := context.WithTimeout(mn.ctx, mn.config.PingTimeout*2) // Ví dụ: timeout gấp đôi PingTimeout
+	// Use the node's context for the connection attempt.
+	// A child context with a timeout can be created for finer control.
+	// Example: using a timeout twice the PingTimeout.
+	connectCtx, cancel := context.WithTimeout(mn.ctx, mn.config.PingTimeout*2)
 	defer cancel()
 
-	err := mn.host.Connect(connectCtx, peerInfo) // Sử dụng peerInfo đầy đủ
+	err := mn.host.Connect(connectCtx, peerInfo) // Use the full peerInfo.
 	if err != nil {
-		// Cập nhật trạng thái thất bại. peerType được lấy từ currentPeerInfo.Type đã thiết lập ở trên.
+		// Update status to failed. peerType is taken from currentPeerInfo.Type set above.
 		mn.updatePeerStatus(peerInfo.ID, PeerFailed, err, currentPeerInfo.Type)
-		log.Printf("Không thể kết nối tới peer %s: %v", peerInfo.ID, err)
-		// Thử kết nối lại nếu cần thiết
+		log.Printf("Failed to connect to peer %s: %v", peerInfo.ID, err)
+		// Attempt to reconnect if necessary.
 		mn.tryReconnectToPeer(peerInfo.ID, currentPeerInfo.Type)
-		return fmt.Errorf("không thể kết nối tới peer %s: %w", peerInfo.ID, err)
+		return fmt.Errorf("failed to connect to peer %s: %w", peerInfo.ID, err)
 	}
-	// Nếu không có lỗi, yêu cầu kết nối đã được gửi.
-	// Trạng thái sẽ được cập nhật thành PeerConnected bởi connection notifier (ConnectedF).
-	// Không cần gọi updatePeerStatus( PeerConnected ) ở đây.
-	log.Printf("Yêu cầu kết nối tới peer %s đã được gửi.", peerInfo.ID)
+	// If no error, the connection request has been initiated.
+	// The status will be updated to PeerConnected by the connection notifier (ConnectedF).
+	// No need to call updatePeerStatus(PeerConnected) here.
+	log.Printf("Connection request to peer %s initiated.", peerInfo.ID)
 	return nil
 }
 
-// updatePeerStatus cập nhật trạng thái của một peer.
+// updatePeerStatus updates the status of a managed peer.
+// peerTypeIfNew is used if the peer is being added to the map for the first time (e.g. inbound connection).
 func (mn *ManagedNode) updatePeerStatus(peerID peer.ID, status PeerStatus, err error, peerTypeIfNew string) {
 	mn.peerMutex.Lock()
 	defer mn.peerMutex.Unlock()
 
 	pInfo, exists := mn.peers[peerID]
 	if !exists {
+		// If peer is not known, only add it if it's a new successful connection.
 		if status == PeerConnected {
-			log.Printf("Peer mới %s đã kết nối.", peerID)
+			log.Printf("New peer %s connected.", peerID)
 			var addrs []peer.AddrInfo
-			conns := mn.host.Network().ConnsToPeer(peerID) // Sửa lỗi chính tả từ ConnsToPeer
+			// Get addresses from active connections to this peer.
+			conns := mn.host.Network().ConnsToPeer(peerID)
 			if len(conns) > 0 {
+				// Use the address from the first connection.
 				remoteMultiaddr := conns[0].RemoteMultiaddr()
 				addrInfo, _ := peer.AddrInfoFromP2pAddr(remoteMultiaddr)
 				if addrInfo != nil {
@@ -249,19 +264,19 @@ func (mn *ManagedNode) updatePeerStatus(peerID peer.ID, status PeerStatus, err e
 			mn.peers[peerID] = &ManagedPeerInfo{
 				ID:        peerID,
 				Addresses: addrs,
-				Type:      peerTypeIfNew,
+				Type:      peerTypeIfNew, // Use the provided type.
 				Status:    status,
 				LastSeen:  time.Now(),
 			}
 		} else {
-			// log.Printf("Cập nhật trạng thái cho peer không xác định %s bị bỏ qua (trừ khi là Connected)", peerID)
+			// log.Printf("Status update for unknown peer %s ignored (unless it's a new 'Connected' status)", peerID)
 		}
 		return
 	}
 
-	// Chỉ cập nhật nếu trạng thái thay đổi hoặc có lỗi mới
+	// Only update if status changes or there's a new error.
 	if pInfo.Status == status && err == pInfo.LastError {
-		if status == PeerConnected { // Cập nhật LastSeen ngay cả khi trạng thái không đổi
+		if status == PeerConnected { // Update LastSeen even if status is already Connected.
 			pInfo.LastSeen = time.Now()
 		}
 		return
@@ -271,78 +286,82 @@ func (mn *ManagedNode) updatePeerStatus(peerID peer.ID, status PeerStatus, err e
 	pInfo.Status = status
 	pInfo.LastError = err
 
-	if status == PeerConnected {
+	switch status {
+	case PeerConnected:
 		pInfo.LastSeen = time.Now()
-		pInfo.ReconnectAttempts = 0
+		pInfo.ReconnectAttempts = 0 // Reset attempts on successful connection.
 		if pInfo.cancelReconnect != nil {
-			pInfo.cancelReconnect()
+			pInfo.cancelReconnect() // Cancel any ongoing reconnect attempt.
 			pInfo.cancelReconnect = nil
 		}
-		log.Printf("Peer %s: %s -> %s", peerID, oldStatus, status)
-	} else if status == PeerFailed {
-		// pInfo.ReconnectAttempts++ // Số lần thử lại được tăng trong tryReconnectToPeer
-		log.Printf("Peer %s: %s -> %s (Lỗi: %v, Thử lại hiện tại: %d)", peerID, oldStatus, status, err, pInfo.ReconnectAttempts)
-	} else if status == PeerConnecting {
-		// Reset số lần thử lại khi bắt đầu một chu kỳ kết nối mới một cách chủ động
+		log.Printf("Peer %s status: %s -> %s", peerID, oldStatus, status)
+	case PeerFailed:
+		// ReconnectAttempts is incremented in tryReconnectToPeer.
+		log.Printf("Peer %s status: %s -> %s (Error: %v, Current Reconnect Attempts: %d)", peerID, oldStatus, status, err, pInfo.ReconnectAttempts)
+	case PeerConnecting:
+		// Reset reconnect attempts when a new connection cycle is actively started.
 		if oldStatus == PeerDisconnected || oldStatus == PeerFailed {
 			pInfo.ReconnectAttempts = 0
 		}
-		log.Printf("Peer %s: %s -> %s", peerID, oldStatus, status)
-	} else {
-		log.Printf("Peer %s: %s -> %s", peerID, oldStatus, status)
+		log.Printf("Peer %s status: %s -> %s", peerID, oldStatus, status)
+	default: // PeerDisconnected or other statuses.
+		log.Printf("Peer %s status: %s -> %s", peerID, oldStatus, status)
 	}
 }
 
-// tryReconnectToPeer bắt đầu quá trình kết nối lại cho một peer trong một goroutine mới.
+// tryReconnectToPeer starts a new goroutine to attempt reconnection to a peer.
 func (mn *ManagedNode) tryReconnectToPeer(peerID peer.ID, peerType string) {
 	mn.peerMutex.Lock()
 	pInfo, exists := mn.peers[peerID]
 	if !exists {
 		mn.peerMutex.Unlock()
-		log.Printf("Peer %s không tìm thấy để kết nối lại.", peerID)
+		log.Printf("Peer %s not found for reconnection.", peerID)
 		return
 	}
+	// If a reconnect attempt is already in progress, or peer is connected, do nothing.
 	if pInfo.cancelReconnect != nil {
 		mn.peerMutex.Unlock()
-		// log.Printf("Đã có một tiến trình kết nối lại cho peer %s.", peerID)
+		// log.Printf("Reconnection process already active for peer %s.", peerID)
 		return
 	}
-	if pInfo.Status == PeerConnected { // Không kết nối lại nếu đã kết nối
+	if pInfo.Status == PeerConnected {
 		mn.peerMutex.Unlock()
 		return
 	}
 
-	reconnectCtx, cancel := context.WithCancel(mn.ctx)
+	reconnectCtx, cancel := context.WithCancel(mn.ctx) // Create a cancellable context for this attempt.
 	pInfo.cancelReconnect = cancel
-	// Không đặt pInfo.Status = PeerConnecting ở đây, để cho goroutine tự cập nhật
-	// để tránh tình trạng trạng thái bị kẹt là Connecting nếu goroutine không bao giờ chạy.
+	// The goroutine itself will set status to PeerConnecting to avoid race conditions
+	// if it doesn't start immediately.
 	mn.peerMutex.Unlock()
 
 	mn.reconnectWG.Add(1)
 	go func(pID peer.ID, pType string, currentReconnectCtx context.Context) {
 		defer mn.reconnectWG.Done()
-		defer func() {
+		defer func() { // Cleanup when the goroutine exits.
 			mn.peerMutex.Lock()
 			if pi, ok := mn.peers[pID]; ok {
-				pi.cancelReconnect = nil
-				if pi.Status == PeerConnecting { // Nếu vẫn đang connecting khi goroutine kết thúc, nghĩa là thất bại
-					pi.Status = PeerDisconnected
-					log.Printf("Peer %s vẫn ở trạng thái Connecting sau khi goroutine kết nối lại kết thúc, đặt thành Disconnected.", pID)
+				pi.cancelReconnect = nil // Clear the cancel function.
+				// If still 'Connecting' when goroutine ends, it means the overall attempt might have timed out or failed.
+				if pi.Status == PeerConnecting {
+					pi.Status = PeerDisconnected // Revert to Disconnected if stuck in Connecting.
+					log.Printf("Reconnection goroutine for peer %s ended while status was Connecting; set to Disconnected.", pID)
 				}
 			}
 			mn.peerMutex.Unlock()
 		}()
 
-		// Cập nhật trạng thái thành Connecting khi goroutine bắt đầu
+		// Set status to Connecting when the goroutine begins its work.
 		mn.updatePeerStatus(pID, PeerConnecting, nil, pType)
 
 		delay := mn.config.InitialReconnectDelay
 		maxAttempts := mn.config.MaxReconnectAttempts
-		if maxAttempts <= 0 { // Nếu cấu hình là 0 hoặc âm, thử vô hạn (hoặc một số lần rất lớn)
-			maxAttempts = 1000 // Hoặc math.MaxInt32, nhưng cẩn thận
-			log.Printf("Peer %s: MaxReconnectAttempts được đặt thành %d (thử gần như vô hạn).", pID, maxAttempts)
+		if maxAttempts <= 0 { // If 0 or negative, treat as (near) infinite attempts.
+			maxAttempts = 1000 // A large number, or use math.MaxInt32 cautiously.
+			log.Printf("Peer %s: MaxReconnectAttempts configured for (near) infinite retries (set to %d).", pID, maxAttempts)
 		}
 
+		// Get current attempts from peer info to resume, if any.
 		currentAttempt := 0
 		mn.peerMutex.RLock()
 		if pi, ok := mn.peers[pID]; ok {
@@ -352,78 +371,85 @@ func (mn *ManagedNode) tryReconnectToPeer(peerID peer.ID, peerType string) {
 
 		for attempt := currentAttempt; attempt < maxAttempts; attempt++ {
 			select {
-			case <-currentReconnectCtx.Done():
-				log.Printf("Tiến trình kết nối lại cho peer %s đã bị hủy.", pID)
+			case <-currentReconnectCtx.Done(): // Check if reconnection was cancelled (e.g., node stopping).
+				log.Printf("Reconnection process for peer %s cancelled.", pID)
 				return
 			default:
 			}
 
 			mn.peerMutex.Lock()
 			if pi, ok := mn.peers[pID]; ok {
-				pi.ReconnectAttempts = attempt + 1 // Cập nhật số lần thử thực tế
+				pi.ReconnectAttempts = attempt + 1 // Update actual attempt count.
 			}
 			mn.peerMutex.Unlock()
 
-			log.Printf("Đang thử kết nối lại tới peer %s (Loại: %s, Lần thử: %d/%d, Độ trễ: %s)", pID, pType, attempt+1, maxAttempts, delay)
+			log.Printf("Attempting to reconnect to peer %s (Type: %s, Attempt: %d/%d, Delay: %s)", pID, pType, attempt+1, maxAttempts, delay)
 
+			// Get the target address info.
 			mn.peerMutex.RLock()
 			var targetAddrInfo *peer.AddrInfo
 			if pi, ok := mn.peers[pID]; ok && len(pi.Addresses) > 0 {
-				addrCopy := pi.Addresses[0]
+				// Use a copy of the address info.
+				addrCopy := pi.Addresses[0] // Assuming first address is primary.
 				targetAddrInfo = &addrCopy
 			}
 			mn.peerMutex.RUnlock()
 
 			if targetAddrInfo == nil {
-				log.Printf("Không có thông tin địa chỉ để kết nối lại tới peer %s.", pID)
-				mn.updatePeerStatus(pID, PeerFailed, errors.New("không có địa chỉ để kết nối lại"), pType)
+				log.Printf("No address information available to reconnect to peer %s.", pID)
+				mn.updatePeerStatus(pID, PeerFailed, errors.New("no address for reconnection"), pType)
 				return
 			}
 
+			// Add addresses to peerstore again before connecting.
 			mn.host.Peerstore().AddAddrs(targetAddrInfo.ID, targetAddrInfo.Addrs, peerstore.PermanentAddrTTL)
 
-			connectCtx, connectCancel := context.WithTimeout(currentReconnectCtx, mn.config.PingTimeout*3) // Tăng timeout cho connect
+			// Use a timeout for the connection attempt.
+			connectCtx, connectCancel := context.WithTimeout(currentReconnectCtx, mn.config.PingTimeout*3) // Increased timeout for connect.
 			err := mn.host.Connect(connectCtx, *targetAddrInfo)
 			connectCancel()
 
 			if err == nil {
-				log.Printf("Kết nối lại thành công tới peer %s.", pID)
-				// Connection notifier sẽ cập nhật trạng thái và hủy cancelReconnect
+				log.Printf("Successfully reconnected to peer %s.", pID)
+				// Connection notifier will update status and clear cancelReconnect.
 				return
 			}
 
-			log.Printf("Kết nối lại tới peer %s thất bại: %v", pID, err)
-			mn.updatePeerStatus(pID, PeerFailed, err, pType)
+			log.Printf("Reconnect attempt to peer %s failed: %v", pID, err)
+			mn.updatePeerStatus(pID, PeerFailed, err, pType) // Update status to reflect this failure.
 
+			// Wait for the delay period before next attempt, or if context is cancelled.
 			select {
 			case <-currentReconnectCtx.Done():
-				log.Printf("Tiến trình kết nối lại cho peer %s đã bị hủy trong khi chờ.", pID)
+				log.Printf("Reconnection process for peer %s cancelled while waiting for delay.", pID)
 				return
 			case <-time.After(delay):
-				jitter := time.Duration(rand.Int63n(int64(delay) / 5))                                             // Jitter lên đến 20%
-				delay = time.Duration(math.Min(float64(mn.config.MaxReconnectDelay), float64(delay)*1.8)) + jitter // Tăng backoff mạnh hơn một chút
+				// Apply exponential backoff with jitter.
+				jitter := time.Duration(rand.Int63n(int64(delay) / 5)) // Jitter up to 20%.
+				// Increase delay, ensuring it doesn't exceed MaxReconnectDelay.
+				delay = time.Duration(math.Min(float64(mn.config.MaxReconnectDelay), float64(delay)*1.8)) + jitter
 			}
 		}
-		log.Printf("Từ bỏ kết nối lại tới peer %s sau %d lần thử.", pID, maxAttempts)
-		mn.updatePeerStatus(pID, PeerDisconnected, fmt.Errorf("từ bỏ sau %d lần thử", maxAttempts), pType)
+		log.Printf("Gave up reconnecting to peer %s after %d attempts.", pID, maxAttempts)
+		mn.updatePeerStatus(pID, PeerDisconnected, fmt.Errorf("gave up after %d attempts", maxAttempts), pType)
 	}(peerID, peerType, reconnectCtx)
 }
 
-// peerHealthMonitor định kỳ kiểm tra kết nối peer.
+// peerHealthMonitor periodically checks the health of connected peers.
 func (mn *ManagedNode) peerHealthMonitor() {
 	defer mn.wg.Done()
 	if mn.config.PingInterval <= 0 {
-		log.Println("Theo dõi sức khỏe peer bị tắt do PingInterval <= 0.")
+		log.Println("Peer health monitor disabled (PingInterval <= 0).")
 		return
 	}
 	ticker := time.NewTicker(mn.config.PingInterval)
 	defer ticker.Stop()
 
-	log.Println("Theo dõi sức khỏe peer đã bắt đầu.")
+	log.Println("Peer health monitor started.")
 	for {
 		select {
-		case <-mn.ctx.Done():
-			log.Println("Theo dõi sức khỏe peer đang dừng.")
+		case <-mn.ctx.Done(): // Node context cancelled.
+			log.Println("Peer health monitor stopping.")
 			return
 		case <-ticker.C:
 			mn.checkAllPeerConnections()
@@ -431,14 +457,15 @@ func (mn *ManagedNode) peerHealthMonitor() {
 	}
 }
 
-// checkAllPeerConnections kiểm tra tất cả các kết nối peer.
+// checkAllPeerConnections iterates through managed peers and verifies their connectivity.
 func (mn *ManagedNode) checkAllPeerConnections() {
 	mn.peerMutex.RLock()
+	// Create a slice of peers to check to avoid holding lock during network calls.
 	var peersToCheck []struct {
 		id         peer.ID
-		ty         string
+		ty         string // type
 		stat       PeerStatus
-		cancelFunc context.CancelFunc
+		cancelFunc context.CancelFunc // To check if reconnect is already active
 	}
 	for pid, pinfo := range mn.peers {
 		peersToCheck = append(peersToCheck, struct {
@@ -450,108 +477,73 @@ func (mn *ManagedNode) checkAllPeerConnections() {
 	}
 	mn.peerMutex.RUnlock()
 
-	// log.Printf("Đang kiểm tra sức khỏe của %d peer...", len(peersToCheck))
+	// log.Printf("Performing health check for %d peer(s)...", len(peersToCheck))
 	connectedCount := 0
 	for _, p := range peersToCheck {
 		if mn.host.Network().Connectedness(p.id) == network.Connected {
+			// If libp2p says connected, but our status is different, update it.
 			if p.stat != PeerConnected {
 				mn.updatePeerStatus(p.id, PeerConnected, nil, p.ty)
 			}
 			connectedCount++
 		} else {
-			// Chỉ thử kết nối lại nếu không đang trong quá trình kết nối lại (p.cancelFunc == nil)
-			// và không phải vừa mới thất bại (tránh gọi tryReconnectToPeer liên tục)
+			// If libp2p says not connected.
+			// Only try to reconnect if not already connecting/reconnecting and not recently failed.
 			if p.stat != PeerConnecting && p.cancelFunc == nil {
-				log.Printf("Peer %s được phát hiện đã ngắt kết nối (%s). Thử kết nối lại.", p.id, p.stat)
-				mn.updatePeerStatus(p.id, PeerDisconnected, errors.New("ngắt kết nối khi kiểm tra sức khỏe"), p.ty)
+				log.Printf("Peer %s detected as disconnected during health check (current status: %s). Initiating reconnect.", p.id, p.stat)
+				mn.updatePeerStatus(p.id, PeerDisconnected, errors.New("disconnected on health check"), p.ty)
 				mn.tryReconnectToPeer(p.id, p.ty)
 			}
 		}
 	}
-	// log.Printf("Kiểm tra sức khỏe peer hoàn tất. Số peer đang kết nối: %d/%d", connectedCount, len(peersToCheck))
+	// log.Printf("Peer health check complete. Connected peers: %d/%d", connectedCount, len(peersToCheck))
 }
 
-// // setupConnectionNotifier thiết lập notifier cho các sự kiện kết nối.
-// func (mn *ManagedNode) setupConnectionNotifier() {
-// 	mn.host.Network().Notify(&network.NotifyBundle{
-// 		ConnectedF: func(net network.Network, conn network.Conn) {
-// 			peerID := conn.RemotePeer()
-// 			log.Printf("✅ Đã kết nối tới peer: %s (Địa chỉ: %s)", peerID, conn.RemoteMultiaddr())
-
-// 			mn.peerMutex.RLock() // Dùng RLock vì chỉ đọc pInfo.Type
-// 			pInfo, exists := mn.peers[peerID]
-// 			var peerType string
-// 			if exists {
-// 				peerType = pInfo.Type
-// 			} else {
-// 				peerType = "unknown_inbound"
-// 			}
-// 			mn.peerMutex.RUnlock()
-
-// 			mn.updatePeerStatus(peerID, PeerConnected, nil, peerType)
-// 			mn.host.Peerstore().AddAddr(peerID, conn.RemoteMultiaddr(), peerstore.ConnectedAddrTTL)
-// 		},
-// 		DisconnectedF: func(net network.Network, conn network.Conn) {
-// 			peerID := conn.RemotePeer()
-// 			log.Printf("❌ Đã ngắt kết nối từ peer: %s", peerID)
-
-// 			mn.peerMutex.RLock()
-// 			pInfo, exists := mn.peers[peerID]
-// 			var peerType string
-// 			if exists {
-// 				peerType = pInfo.Type
-// 			}
-// 			mn.peerMutex.RUnlock()
-
-// 			mn.updatePeerStatus(peerID, PeerDisconnected, errors.New("đã ngắt kết nối"), peerType)
-
-// 			// Quyết định xem có cần kết nối lại không
-// 			if exists && shouldReconnect(pInfo.Type, mn.config) {
-// 				log.Printf("Lên lịch kết nối lại cho peer quan trọng %s (Loại: %s)", peerID, pInfo.Type)
-// 				mn.tryReconnectToPeer(peerID, pInfo.Type)
-// 			}
-// 		},
-// 	})
-// }
-
-// shouldReconnect kiểm tra xem có nên kết nối lại với một loại peer cụ thể không.
+// shouldReconnect determines if a reconnection attempt should be made for a peer of a given type.
 func shouldReconnect(peerType string, config NodeConfig) bool {
-	// Ví dụ: luôn kết nối lại với master, bootstrap, validator
-	// Hoặc dựa trên một danh sách cấu hình các loại peer cần duy trì kết nối
+	// Example: always reconnect to "master", "bootstrap", "validator" types.
+	// This can be expanded based on configuration or specific application needs.
 	switch peerType {
 	case "master", "bootstrap", "validator":
 		return true
 	default:
-		return false // Không tự động kết nối lại với các loại peer khác
+		// Do not automatically reconnect to other peer types unless specified.
+		return false
 	}
 }
 
-// GetPeersInfo trả về ảnh chụp nhanh thông tin peer hiện tại.
+// GetPeersInfo returns a snapshot of the current peer information.
+// It creates a deep copy of the peer data to ensure thread safety for the caller.
 func (mn *ManagedNode) GetPeersInfo() map[peer.ID]ManagedPeerInfo {
 	mn.peerMutex.RLock()
 	defer mn.peerMutex.RUnlock()
 
 	peersCopy := make(map[peer.ID]ManagedPeerInfo, len(mn.peers))
 	for id, infoPtr := range mn.peers {
+		// Dereference the pointer to copy the struct.
 		infoCopy := *infoPtr
+		// Deep copy slices within the struct if any (e.g., Addresses).
 		if len(infoPtr.Addresses) > 0 {
 			infoCopy.Addresses = make([]peer.AddrInfo, len(infoPtr.Addresses))
 			copy(infoCopy.Addresses, infoPtr.Addresses)
 		}
+		// Note: cancelReconnect is a func, cannot be easily deep-copied if needed by caller,
+		// but GetPeersInfo is typically for informational display.
 		peersCopy[id] = infoCopy
 	}
 	return peersCopy
 }
 
-// cancelAllReconnects hủy tất cả các goroutine kết nối lại đang hoạt động.
+// cancelAllReconnects cancels all active peer reconnection goroutines.
+// This is typically called when the node is shutting down.
 func (mn *ManagedNode) cancelAllReconnects() {
-	mn.peerMutex.Lock()
+	mn.peerMutex.Lock() // Lock to safely iterate and modify pInfo.cancelReconnect.
 	defer mn.peerMutex.Unlock()
-	log.Println("Đang hủy tất cả các tiến trình kết nối lại đang chờ...")
+	log.Println("Cancelling all pending peer reconnection attempts...")
 	for _, pInfo := range mn.peers {
 		if pInfo.cancelReconnect != nil {
 			pInfo.cancelReconnect()
-			// pInfo.cancelReconnect = nil // Sẽ được đặt thành nil bởi defer trong goroutine
+			// pInfo.cancelReconnect will be set to nil by the defer func in the goroutine itself.
 		}
 	}
 }

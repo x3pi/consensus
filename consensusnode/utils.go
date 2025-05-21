@@ -8,50 +8,53 @@ import (
 	"github.com/libp2p/go-libp2p/core/crypto"
 )
 
-// BlockRequestProtocol định nghĩa ID protocol cho yêu cầu block.
-// Đảm bảo hằng số này nhất quán với định nghĩa ở các file khác nếu có.
-// const BlockRequestProtocol protocol.ID = "/meta-node/block-request/1.0.0" // Đã định nghĩa ở managed_node.go
+// The BlockRequestProtocol ID is defined in managed_node.go and should not be duplicated here.
+// const BlockRequestProtocol protocol.ID = "/meta-node/block-request/1.0.0"
 
-// loadPrivateKey là một helper để tải hoặc tạo khóa riêng tư.
-// Sử dụng base64 decoding chuẩn.
+// loadPrivateKey is a helper function to load a private key from a base64 encoded string
+// or generate a new one if the string is empty.
+// It uses standard base64 decoding.
 func loadPrivateKey(keyStr string) (crypto.PrivKey, error) {
 	if keyStr == "" {
-		log.Println("Không tìm thấy khóa riêng tư trong cấu hình, đang tạo khóa mới...")
-		// Sử dụng Ed25519 làm mặc định vì nó hiệu quả và an toàn
+		log.Println("No private key found in configuration, generating a new key...")
+		// Use Ed25519 as the default key type due to its efficiency and security.
 		priv, _, err := crypto.GenerateKeyPair(crypto.Ed25519, -1)
 		if err != nil {
-			return nil, fmt.Errorf("không thể tạo cặp khóa Ed25519: %w", err)
+			return nil, fmt.Errorf("could not generate Ed25519 key pair: %w", err)
 		}
-		// Log khóa mới được tạo (chỉ cho mục đích dev/test, không bao giờ log private key trong production)
+		// For development/testing purposes, you might want to log the new private key.
+		// NEVER log private keys in a production environment.
+		// Example:
 		// encoded, _ := crypto.MarshalPrivateKey(priv)
-		// log.Printf("Khóa riêng tư mới (base64): %s", base64.StdEncoding.EncodeToString(encoded))
+		// log.Printf("New private key (base64): %s", base64.StdEncoding.EncodeToString(encoded))
 		return priv, nil
 	}
+
 	keyBytes, err := base64.StdEncoding.DecodeString(keyStr)
 	if err != nil {
-		return nil, fmt.Errorf("không thể giải mã base64 cho khóa riêng tư: %w", err)
+		return nil, fmt.Errorf("could not decode base64 private key string: %w", err)
 	}
 	privKey, err := crypto.UnmarshalPrivateKey(keyBytes)
 	if err != nil {
-		return nil, fmt.Errorf("không thể unmarshal khóa riêng tư: %w", err)
+		return nil, fmt.Errorf("could not unmarshal private key: %w", err)
 	}
-	log.Println("Đã tải khóa riêng tư từ cấu hình thành công.")
+	log.Println("Successfully loaded private key from configuration.")
 	return privKey, nil
 }
 
-// displayNodeInfo hiển thị thông tin của node.
-// Đây là một phương thức của ManagedNode để truy cập host và config.
+// displayNodeInfo logs essential information about the ManagedNode.
+// This method requires the ManagedNode's host to be initialized.
 func (mn *ManagedNode) displayNodeInfo() {
 	if mn.host == nil {
-		log.Println("Host chưa được khởi tạo, không thể hiển thị thông tin node.")
+		log.Println("Host not initialized, cannot display node information.")
 		return
 	}
-	log.Printf("===== Thông tin Node =====")
+	log.Printf("===== Node Information =====")
 	log.Printf("Node ID: %s", mn.host.ID())
-	log.Printf("Loại Node: %s", mn.config.NodeType)
-	log.Println("Địa chỉ lắng nghe:")
+	log.Printf("Node Type: %s", mn.config.NodeType)
+	log.Println("Listening Addresses:")
 	if len(mn.host.Addrs()) == 0 {
-		log.Println("  (Không có địa chỉ lắng nghe nào được thiết lập hoặc host chưa sẵn sàng)")
+		log.Println("  (No listening addresses configured or host not fully started)")
 	}
 	for _, addr := range mn.host.Addrs() {
 		log.Printf("  %s/p2p/%s", addr, mn.host.ID())

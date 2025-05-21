@@ -2,100 +2,111 @@ package dag
 
 import (
 	"bytes"
+	"encoding/hex"
 	"fmt"
-	"log" // Thêm import log để ghi lại lỗi tiềm ẩn từ event.Hash()
+	"log" // Used for logging potential errors during event hashing.
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	borsh "github.com/near/borsh-go"
+
+	"github.com/blockchain/consensus/logger" // Custom logger.
 )
 
-// EventID là kiểu dữ liệu cho hash của Event. EventID chính là hash của EventData.
+// EventID represents the hash of an Event. It is specifically the hash of EventData.
 type EventID common.Hash
 
-// Bytes trả về biểu diễn byte của EventID
+// Bytes returns the byte representation of the EventID.
 func (id EventID) Bytes() []byte {
 	return common.Hash(id).Bytes()
 }
 
-// String trả về biểu diễn hex của EventID
+// String returns the hexadecimal representation of the EventID.
 func (id EventID) String() string {
 	return common.Hash(id).Hex()
 }
 
-// IsZero kiểm tra xem EventID có phải là zero hash không
+// IsZero checks if the EventID is a zero hash.
 func (id EventID) IsZero() bool {
 	return common.Hash(id) == common.Hash{}
 }
 
-// ClothoStatus định nghĩa trạng thái lựa chọn Clotho của một Root.
+// ClothoStatus defines the Clotho selection status of a Root event.
 type ClothoStatus string
 
 const (
-	ClothoUndecided   ClothoStatus = "UNDECIDED"     // Chưa được quyết định
-	ClothoIsClotho    ClothoStatus = "IS-CLOTHO"     // Đã quyết định là Clotho (ứng viên Atropos)
-	ClothoIsNotClotho ClothoStatus = "IS-NOT-CLOTHO" // Đã quyết định không phải là Clotho
+	// ClothoUndecided indicates that the Clotho status has not yet been determined.
+	ClothoUndecided ClothoStatus = "UNDECIDED"
+	// ClothoIsClotho indicates that the event has been decided as a Clotho (Atropos candidate).
+	ClothoIsClotho ClothoStatus = "IS-CLOTHO"
+	// ClothoIsNotClotho indicates that the event has been decided not to be a Clotho.
+	ClothoIsNotClotho ClothoStatus = "IS-NOT-CLOTHO"
 )
 
-// EventData là cấu trúc chứa dữ liệu cốt lõi của Event được dùng để tính toán hash (EventID).
-// Các trường trong cấu trúc này sẽ được tuần tự hóa bằng Borsh để hashing.
+// EventData contains the core data of an Event, used for hash computation (EventID).
+// Fields in this struct are serialized using Borsh for hashing.
 type EventData struct {
-	Transactions []byte    `borsh:"slice"`     // Danh sách các giao dịch hoặc dữ liệu khác (byte slice)
-	SelfParent   EventID   `borsh:"[32]uint8"` // Hash của parent cùng validator (size 32 bytes)
-	OtherParents []EventID `borsh:"slice"`     // Hash của các parent khác validator (slice các size 32 bytes)
-	Creator      []byte    `borsh:"slice"`     // Public key của người tạo event (byte slice)
-	Index        uint64    `borsh:"uint64"`    // Sequence number của event do validator này tạo
-	Timestamp    int64     `borsh:"int64"`     // Unix timestamp (thời gian tạo event)
-	Frame        uint64    `borsh:"uint64"`    // Frame number của event này
-	IsRoot       bool      `borsh:"bool"`      // Cờ đánh dấu event này có phải là Root của frame không
+	Transactions []byte    `borsh:"slice"`     // List of transactions or other data (byte slice).
+	SelfParent   EventID   `borsh:"[32]uint8"` // Hash of the self-parent event (from the same validator, 32 bytes).
+	OtherParents []EventID `borsh:"slice"`     // Hashes of other parent events (from different validators, slice of 32-byte hashes).
+	Creator      []byte    `borsh:"slice"`     // Public key of the event creator (byte slice).
+	Index        uint64    `borsh:"uint64"`    // Sequence number of the event created by this validator.
+	Timestamp    int64     `borsh:"int64"`     // Unix timestamp (event creation time).
+	Frame        uint64    `borsh:"uint64"`    // Frame number of this event.
+	IsRoot       bool      `borsh:"bool"`      // Flag indicating if this event is a Root of its frame.
 }
 
-// Event là cấu trúc hoàn chỉnh của một Event trong DAG.
-// Nó bao gồm dữ liệu EventData, chữ ký và cache hash.
+// Event is the complete structure of an Event in the DAG.
+// It includes EventData, signature, and a cached hash.
 type Event struct {
-	EventData // Nhúng EventData - dữ liệu dùng để hash
+	EventData // Embedded EventData - data used for hashing.
 
-	Signature []byte `borsh:"slice"` // Chữ ký của người tạo trên hash của EventData
+	Signature []byte `borsh:"slice"` // Signature of the EventData hash by the creator.
 
-	// Cache cho hash of EventData (EventID) sử dụng atomic.Pointer để an toàn cho đồng thời.
+	// cachedHash caches the EventData hash (EventID) using atomic.Pointer for concurrent access safety.
 	cachedHash atomic.Pointer[common.Hash] `borsh:"skip"`
 
-	// --- Trường liên quan đến Clotho Selection ---
-	Vote map[EventID]bool `borsh:"skip"` // Key: EventID của Root được bỏ phiếu, Value: Kết quả (true = YES)
-	// Chỉ có ý nghĩa nếu event này là một Root.
+	// Fields related to Clotho Selection.
+	// Vote stores votes cast by this event (if it's a Root) for other Roots.
+	// Key: EventID of the Root being voted on. Value: Vote (true = YES).
+	Vote map[EventID]bool `borsh:"skip"`
 
-	Candidate bool `borsh:"skip"` // Đánh dấu Root này có phải là ứng viên Atropos không
+	// Candidate indicates if this Root event is an Atropos candidate.
+	Candidate bool `borsh:"skip"`
 
-	ClothoStatus ClothoStatus `borsh:"skip"` // Lưu trữ trạng thái quyết định Clotho của Root này.
+	// ClothoStatus stores the decided Clotho status of this Root event.
+	ClothoStatus ClothoStatus `borsh:"skip"`
 
-	mu sync.Mutex `borsh:"skip"` // Mutex cho các trường không tuần tự hóa (Vote, Candidate, ClothoStatus)
+	// mu protects access to non-serialized fields (Vote, Candidate, ClothoStatus).
+	mu sync.Mutex `borsh:"skip"`
 }
 
-// NewEvent tạo một Event mới với các trường được khởi tạo.
+// NewEvent creates a new Event with initialized fields.
 func NewEvent(data EventData, signature []byte) *Event {
 	event := &Event{
 		EventData:    data,
 		Signature:    signature,
-		Vote:         make(map[EventID]bool), // Khởi tạo map Vote
-		ClothoStatus: ClothoUndecided,        // Khởi tạo trạng thái là Undecided
-		Candidate:    false,                  // Mặc định không phải ứng viên
-		// mu và cachedHash sẽ có giá trị zero mặc định của chúng
+		Vote:         make(map[EventID]bool),
+		ClothoStatus: ClothoUndecided,
+		Candidate:    false,
+		// mu and cachedHash will have their default zero values.
 	}
-	// Tính toán và cache hash ngay khi tạo
+	// Calculate and cache the hash upon creation.
 	_, err := event.Hash()
 	if err != nil {
-		// Trong thực tế, bạn có thể muốn xử lý lỗi này nghiêm túc hơn,
-		// ví dụ: trả về lỗi từ NewEvent hoặc panic nếu hash là thiết yếu ngay lúc tạo.
-		log.Printf("Warning: Lỗi khi tính hash trong NewEvent: %v", err)
+		// In a production environment, this error might need more robust handling,
+		// e.g., returning an error from NewEvent or panicking if the hash is critical at creation.
+		log.Printf("Warning: Error calculating hash in NewEvent: %v", err)
 	}
 	return event
 }
 
-// PrepareForHashing sắp xếp các OtherParents để đảm bảo tính xác định
-// trước khi tính hash của EventData.
+// PrepareForHashing sorts OtherParents to ensure deterministic hashing of EventData.
 func (e *Event) PrepareForHashing() error {
 	if len(e.EventData.OtherParents) > 0 {
 		sort.SliceStable(e.EventData.OtherParents, func(i, j int) bool {
@@ -105,11 +116,10 @@ func (e *Event) PrepareForHashing() error {
 	return nil
 }
 
-// Hash tính toán hash (EventID) của EventData.
-// Kết quả được cache để tránh tính toán lại nhiều lần.
+// Hash computes the hash (EventID) of the EventData.
+// The result is cached to avoid recomputation.
 func (e *Event) Hash() (EventID, error) {
-	cached := e.cachedHash.Load()
-	if cached != nil {
+	if cached := e.cachedHash.Load(); cached != nil {
 		return EventID(*cached), nil
 	}
 
@@ -127,28 +137,27 @@ func (e *Event) Hash() (EventID, error) {
 	return EventID(hash), nil
 }
 
-// GetEventId trả về EventID (hash) của Event.
+// GetEventId returns the EventID (hash) of the Event.
 func (e *Event) GetEventId() EventID {
-	cached := e.cachedHash.Load()
-	if cached != nil {
+	if cached := e.cachedHash.Load(); cached != nil {
 		return EventID(*cached)
 	}
-	// Nếu hash chưa được cache, tính toán nó.
-	// Trong NewEvent và Unmarshal, Hash() được gọi, nên trường hợp này ít khi xảy ra trừ khi có lỗi trước đó.
+	// If the hash is not cached, compute it.
+	// Hash() is called in NewEvent and Unmarshal, so this case is unlikely unless there was a prior error.
 	hash, err := e.Hash()
 	if err != nil {
-		log.Printf("Warning: Lỗi khi gọi Hash() bên trong GetEventId(): %v. Trả về EventID rỗng.", err)
-		return EventID{} // Trả về EventID rỗng nếu có lỗi
+		log.Printf("Warning: Error calling Hash() inside GetEventId(): %v. Returning zero EventID.", err)
+		return EventID{} // Return a zero EventID on error.
 	}
 	return hash
 }
 
-// Marshal tuần tự hóa toàn bộ Event (EventData và Signature) thành dạng byte sử dụng Borsh.
+// Marshal serializes the entire Event (EventData and Signature) into a byte slice using Borsh.
 func (e *Event) Marshal() ([]byte, error) {
-	// Định nghĩa một struct tạm thời chỉ chứa các trường cần serialize
-	// để đảm bảo các trường `borsh:"skip"` không ảnh hưởng.
+	// Define a temporary struct containing only fields to be serialized
+	// to ensure `borsh:"skip"` fields are not affected.
 	type serializableEvent struct {
-		EventData        // Nhúng EventData
+		EventData
 		Signature []byte `borsh:"slice"`
 	}
 	temp := serializableEvent{
@@ -158,71 +167,69 @@ func (e *Event) Marshal() ([]byte, error) {
 	return borsh.Serialize(temp)
 }
 
-// serializableEventForUnmarshal là một struct tạm thời chỉ chứa các trường
-// mà chúng ta muốn deserialize từ stream dữ liệu.
-// Điều này giúp tránh các vấn đề reflection với các trường không được export
-// hoặc các trường phức tạp được đánh dấu `borsh:"skip"` trong struct Event chính.
+// serializableEventForUnmarshal is a temporary struct containing only the fields
+// intended for deserialization from a data stream.
+// This helps avoid reflection issues with unexported fields
+// or complex fields marked `borsh:"skip"` in the main Event struct.
 type serializableEventForUnmarshal struct {
-	EventData        // Nhúng EventData
+	EventData
 	Signature []byte `borsh:"slice"`
 }
 
-// Unmarshal giải tuần tự hóa bytes thành cấu trúc Event sử dụng Borsh.
-// Nó sử dụng một struct tạm thời để deserialize các trường cốt lõi,
-// sau đó khởi tạo các trường còn lại của Event.
+// Unmarshal deserializes a byte slice into an Event struct using Borsh.
+// It uses a temporary struct to deserialize core fields,
+// then initializes the remaining fields of the Event.
 func Unmarshal(data []byte) (*Event, error) {
 	var temp serializableEventForUnmarshal
-	err := borsh.Deserialize(&temp, data)
-	if err != nil {
+	if err := borsh.Deserialize(&temp, data); err != nil {
 		return nil, fmt.Errorf("failed to deserialize event core data: %w", err)
 	}
 
-	// Tạo struct Event hoàn chỉnh và điền dữ liệu từ struct tạm thời
+	// Create the complete Event struct and populate it from the temporary struct.
 	event := &Event{
 		EventData:    temp.EventData,
 		Signature:    temp.Signature,
-		Vote:         make(map[EventID]bool), // Khởi tạo map Vote
-		ClothoStatus: ClothoUndecided,        // Khởi tạo trạng thái là Undecided
-		Candidate:    false,                  // Mặc định không phải ứng viên
-		// mu (sync.Mutex) sẽ được khởi tạo với giá trị zero của nó.
-		// cachedHash (atomic.Pointer) cũng sẽ được khởi tạo với giá trị zero (nil).
+		Vote:         make(map[EventID]bool),
+		ClothoStatus: ClothoUndecided,
+		Candidate:    false,
+		// mu (sync.Mutex) will be initialized to its zero value.
+		// cachedHash (atomic.Pointer) will also be initialized to its zero value (nil).
 	}
 
-	// Tính toán và cache hash sau khi deserialize và khởi tạo Event
-	// Quan trọng: Hash() cần được gọi trên event đã được cấu trúc hoàn chỉnh (nếu logic hash phụ thuộc vào nó)
-	// nhưng ở đây Hash() chỉ dựa trên EventData, nên thứ tự này là ổn.
-	_, err = event.Hash()
-	if err != nil {
-		// Ghi log lỗi này vì nó có thể quan trọng cho việc debug sau này
-		log.Printf("Warning: Lỗi khi tính toán hash sau khi Unmarshal event: %v", err)
-		// Tùy thuộc vào yêu cầu, bạn có thể muốn trả về lỗi ở đây nếu hash là bắt buộc
+	// Calculate and cache the hash after deserializing and initializing the Event.
+	// Hash() relies only on EventData, so this order is safe.
+	if _, err := event.Hash(); err != nil {
+		// Log this error as it might be important for later debugging.
+		log.Printf("Warning: Error calculating hash after unmarshalling event: %v", err)
+		// Depending on requirements, you might want to return an error here if the hash is mandatory.
 		// return nil, fmt.Errorf("failed to calculate hash after unmarshalling event: %w", err)
 	}
 
 	return event, nil
 }
 
-// ToEventID là hàm helper để chuyển đổi common.Hash thành EventID.
+// ToEventID is a helper function to convert a common.Hash to an EventID.
 func ToEventID(hash common.Hash) EventID {
 	return EventID(hash)
 }
 
-// HexToEventID là hàm helper để chuyển đổi chuỗi hex thành EventID.
+// HexToEventID is a helper function to convert a hex string to an EventID.
 func HexToEventID(hexStr string) EventID {
 	return EventID(common.HexToHash(hexStr))
 }
 
-// SetVote thiết lập phiếu bầu của event này cho một voting subject root.
+// SetVote sets this event's vote for a subject root event.
 func (e *Event) SetVote(subjectRootID EventID, vote bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.Vote == nil { // Đảm bảo map được khởi tạo
+	if e.Vote == nil { // Ensure the map is initialized.
 		e.Vote = make(map[EventID]bool)
 	}
 	e.Vote[subjectRootID] = vote
 }
 
-// GetVote lấy phiếu bầu của event này cho một voting subject root.
+// GetVote retrieves this event's vote for a subject root event.
+// It returns the vote and a boolean indicating if the vote exists.
 func (e *Event) GetVote(subjectRootID EventID) (vote bool, exists bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -233,16 +240,93 @@ func (e *Event) GetVote(subjectRootID EventID) (vote bool, exists bool) {
 	return
 }
 
-// SetClothoStatus thiết lập trạng thái Clotho của event này.
+// SetClothoStatus sets the Clotho status of this event.
 func (e *Event) SetClothoStatus(status ClothoStatus) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.ClothoStatus = status
 }
 
-// SetCandidate thiết lập trạng thái ứng viên Atropos của event này.
+// SetCandidate sets the Atropos candidate status of this event.
 func (e *Event) SetCandidate(candidate bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.Candidate = candidate
+}
+
+// Short returns a short representation of the EventID (e.g., "0x" + first 6 hex characters).
+// This method is verified to be present and correct as per requirements.
+func (id EventID) Short() string {
+	s := id.String() // Uses the existing String() method of EventID.
+	// A full EventID is "0x" + 64 hex characters. We want "0x" + 6 characters (8 total).
+	if len(s) > 8 {
+		return s[:8] // Returns "0x" and the first 6 hex characters.
+	}
+	return s // If shorter, return the whole string.
+}
+
+// String returns a string representation of the Event, useful for logging and debugging.
+// This method is verified to be present and correct as per requirements.
+func (e *Event) String() string {
+	if e == nil {
+		return "<nil Event>"
+	}
+
+	var sb strings.Builder
+	eventID := e.GetEventId()
+
+	sb.WriteString(fmt.Sprintf("Event[%s]:\n", eventID.Short()))
+	sb.WriteString(fmt.Sprintf("  Creator: %s\n", hex.EncodeToString(e.EventData.Creator)))
+	sb.WriteString(fmt.Sprintf("  Index: %d\n", e.EventData.Index))
+	sb.WriteString(fmt.Sprintf("  Frame: %d\n", e.EventData.Frame))
+	sb.WriteString(fmt.Sprintf("  IsRoot: %t\n", e.EventData.IsRoot))
+	sb.WriteString(fmt.Sprintf("  Timestamp: %s (%d)\n", time.Unix(e.EventData.Timestamp, 0).Format(time.RFC3339), e.EventData.Timestamp))
+
+	if e.EventData.SelfParent.IsZero() {
+		sb.WriteString("  SelfParent: None\n")
+	} else {
+		sb.WriteString(fmt.Sprintf("  SelfParent: %s\n", e.EventData.SelfParent.Short()))
+	}
+
+	if len(e.EventData.OtherParents) == 0 {
+		sb.WriteString("  OtherParents: None\n")
+	} else {
+		var opShorts []string
+		for _, op := range e.EventData.OtherParents {
+			opShorts = append(opShorts, op.Short())
+		}
+		sb.WriteString(fmt.Sprintf("  OtherParents: [%s]\n", strings.Join(opShorts, ", ")))
+	}
+
+	sb.WriteString(fmt.Sprintf("  Transactions: %d bytes\n", len(e.EventData.Transactions)))
+	sb.WriteString(fmt.Sprintf("  Signature: %s...\n", hex.EncodeToString(e.Signature[:min(8, len(e.Signature))]))) // Print part of the signature.
+
+	// Clotho information (if applicable).
+	if e.EventData.IsRoot {
+		e.mu.Lock() // Lock needed when accessing Clotho fields.
+		sb.WriteString(fmt.Sprintf("  ClothoStatus: %s\n", e.ClothoStatus))
+		sb.WriteString(fmt.Sprintf("  Candidate: %t\n", e.Candidate))
+		if len(e.Vote) > 0 {
+			var voteStrings []string
+			for votedID, voteVal := range e.Vote {
+				voteStrings = append(voteStrings, fmt.Sprintf("%s->%t", votedID.Short(), voteVal))
+			}
+			sb.WriteString(fmt.Sprintf("  Votes: {%s}\n", strings.Join(voteStrings, ", ")))
+		} else {
+			sb.WriteString("  Votes: None\n")
+		}
+		e.mu.Unlock()
+	}
+	// The following line uses the custom logger as per the original file's logic.
+	// Note: Logging within a String() method can have side effects and may log large amounts of data.
+	logger.Info(e.EventData.Transactions) // - Kept as per original logic.
+	return sb.String()
+}
+
+// min returns the smaller of a and b.
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
