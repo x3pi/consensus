@@ -291,36 +291,57 @@ func (ds *DagStore) DecideClotho() {
 		return
 	}
 
+	// Map để theo dõi xem một xEvent đã được quyết định trong lượt chạy DecideClotho này chưa.
+	// Điều này giúp continue nextXEventProcessingLoop hoạt động chính xác hơn
+	// và tránh xử lý lại xEvent đã được quyết định ngay trong cùng một cuộc gọi DecideClotho.
+	decidedInThisRun := make(map[EventID]bool)
+
 	for xFrame := startFrame; xFrame <= maxFrameConsidered; xFrame++ {
 		logger.Info(fmt.Sprintf("DecideClotho: Processing xFrame = %d", xFrame))
 		xRootsIDsInCurrentXFrame := ds.rootsByFrame[xFrame]
 		if len(xRootsIDsInCurrentXFrame) == 0 {
 			logger.Info(fmt.Sprintf("DecideClotho: No roots found in xFrame %d.", xFrame))
+			// Không có root trong frame này, nhưng có thể frame này vẫn cần được coi là "đã xử lý"
+			// nếu không có frame nào trước đó bị kẹt. Tuy nhiên, logic allRootsInXFrameDecided
+			// ở cuối sẽ xử lý việc cập nhật lastDecidedFrame một cách chính xác.
 		}
 
-		xEventsToProcess := make([]*Event, 0, len(xRootsIDsInCurrentXFrame))
+		var currentXEventsToProcess []*Event
 		for _, xID := range xRootsIDsInCurrentXFrame {
 			xEvent, exists := ds.events[xID]
-			if exists && xEvent.EventData.IsRoot && xEvent.ClothoStatus == ClothoUndecided {
-				xEventsToProcess = append(xEventsToProcess, xEvent)
+			// Chỉ xử lý nếu event tồn tại, là Root, và chưa được quyết định (ClothoUndecided)
+			// VÀ chưa được quyết định trong chính lượt chạy DecideClotho này.
+			if exists && xEvent.EventData.IsRoot && xEvent.ClothoStatus == ClothoUndecided && !decidedInThisRun[xID] {
+				currentXEventsToProcess = append(currentXEventsToProcess, xEvent)
 			}
 		}
 
-		if len(xEventsToProcess) == 0 {
-			if len(xRootsIDsInCurrentXFrame) > 0 {
-				logger.Info(fmt.Sprintf("DecideClotho: All roots in xFrame %d were decided previously.", xFrame))
+		if len(currentXEventsToProcess) == 0 {
+			if len(xRootsIDsInCurrentXFrame) > 0 { // Có root nhưng tất cả đã được quyết định trước đó hoặc trong lượt này.
+				logger.Info(fmt.Sprintf("DecideClotho: All relevant roots in xFrame %d were already decided (or decided in this run).", xFrame))
 			}
 		} else {
-			logger.Info(fmt.Sprintf("DecideClotho: Found %d undecided roots in xFrame %d to process.", len(xEventsToProcess), xFrame))
+			logger.Info(fmt.Sprintf("DecideClotho: Found %d undecided roots in xFrame %d to process in this run.", len(currentXEventsToProcess), xFrame))
 		}
 
-	nextXEventProcessingLoop: // Label for the outer loop over xEvents.
-		for _, xEvent := range xEventsToProcess {
-			logger.Info("xEventsToProcess: ")
-			logger.Info(xEvent.EventData.Transactions)
+	nextXEventProcessingLoop:
+		for _, xEvent := range currentXEventsToProcess {
+			logger.Info(xEvent.Transactions)
+			// Nếu xEvent đã được quyết định trong các vòng lặp yFrame trước đó của cùng lượt DecideClotho này, bỏ qua.
+			// Điều này quan trọng nếu một xEvent được quyết định bởi một yEvent ở yFrame sớm,
+			// chúng ta không muốn xử lý lại nó với các yEvent ở yFrame muộn hơn trong cùng một cuộc gọi DecideClotho.
+			if xEvent.ClothoStatus != ClothoUndecided || decidedInThisRun[xEvent.GetEventId()] { // Kiểm tra lại trạng thái thực tế và cờ decidedInThisRun
+				continue
+			}
 
+			// logger.Info("Processing xEvent for Clotho: ", xEvent.String()) // Log chi tiết nếu cần
 			xID := xEvent.GetEventId()
-			logger.Info(fmt.Sprintf("DecideClotho: Processing xEvent %s (Frame %d)", xID.String()[:6], xFrame))
+			logger.Info(fmt.Sprintf("DecideClotho: Evaluating xEvent %s (Frame %d)", xID.Short(), xFrame))
+
+			// Tối ưu hóa quan trọng: Chỉ thực hiện bỏ phiếu nếu có yFrame mới hoặc yEvent mới kể từ lần cuối xEvent này được xem xét.
+			// Tuy nhiên, với cách tiếp cận "không trạng thái" giữa các lần gọi DecideClotho,
+			// việc này khó thực hiện mà không lưu thêm trạng thái.
+			// Hiện tại, nó sẽ tính toán lại phiếu bầu từ các yEvent.
 
 			for yFrame := xFrame + 1; yFrame <= maxFrameConsidered; yFrame++ {
 				yRootsIDsInCurrentYFrame := ds.rootsByFrame[yFrame]
@@ -336,10 +357,18 @@ func (ds *DagStore) DecideClotho() {
 
 					round := yEvent.EventData.Frame - xEvent.EventData.Frame
 
-					if round == 1 { // Round 1: Direct observation.
+					// Tối ưu hóa: Nếu yEvent đã bỏ phiếu cho xID này trong một lần xử lý trước đó
+					// (trong cùng một cuộc gọi DecideClotho hoặc từ cuộc gọi trước đó mà trạng thái DAG không đổi),
+					// và các điều kiện cho phiếu bầu đó không thay đổi, có thể xem xét bỏ qua.
+					// Tuy nhiên, "điều kiện không đổi" rất khó xác định một cách đơn giản.
+
+					if round == 1 {
+						// Phiếu bầu trực tiếp không thay đổi nếu xEvent và yEvent không đổi.
+						// Nhưng chúng ta vẫn cần gọi SetVote để yEvent có thông tin này cho các vòng sau.
 						vote := ds.forklessCause(xEvent, yEvent)
 						yEvent.SetVote(xID, vote)
-					} else if round >= 2 { // Round >= 2: Indirect voting (via previous voters).
+						// logger.Debug(fmt.Sprintf("DecideClotho: yEvent %s (F%d) votes %t for xEvent %s (F%d) in round 1", yID.Short(), yFrame, vote, xID.Short(), xFrame))
+					} else if round >= 2 {
 						prevVotersFrame := yFrame - 1
 						prevVotersIDs := ds.rootsByFrame[prevVotersFrame]
 
@@ -352,10 +381,9 @@ func (ds *DagStore) DecideClotho() {
 								continue
 							}
 
-							// Does prevRootEvent strongly see yEvent?
 							if ds.forklessCause(prevRootEvent, yEvent) {
 								prevVote, voteExists := prevRootEvent.GetVote(xID)
-								if voteExists {
+								if voteExists { // Chỉ tính nếu prevRootEvent đã có phiếu cho xID
 									prevVoterStake := ds.getStakeLocked(hex.EncodeToString(prevRootEvent.EventData.Creator))
 									if prevVote {
 										yesVotesStake += prevVoterStake
@@ -366,60 +394,66 @@ func (ds *DagStore) DecideClotho() {
 							}
 						}
 
-						// Determine yEvent's vote based on aggregated stake from previous voters.
 						yFinalVote := (yesVotesStake >= noVotesStake)
-						yEvent.SetVote(xID, yFinalVote)
+						yEvent.SetVote(xID, yFinalVote) // yEvent ghi nhận phiếu bầu tổng hợp của nó cho xID
+						// logger.Debug(fmt.Sprintf("DecideClotho: yEvent %s (F%d) votes %t for xEvent %s (F%d) in round %d (YesStake: %d, NoStake: %d)", yID.Short(), yFrame, yFinalVote, xID.Short(), xFrame, round, yesVotesStake, noVotesStake))
 
+						// Kiểm tra xem xEvent đã đạt QUORUM chưa
 						if yesVotesStake >= QUORUM {
 							xEvent.SetCandidate(true)
 							xEvent.SetClothoStatus(ClothoIsClotho)
-							logger.Info(xEvent.EventData.Transactions)
+							decidedInThisRun[xID] = true // Đánh dấu đã quyết định trong lượt này
 							logger.Info(fmt.Sprintf("DecideClotho: DECIDED - Root %s (F%d) IS CLOTHO. Determined by aggregated votes at yEvent %s (F%d). YesStake: %d >= Quorum: %d",
-								xID.String()[:6], xFrame, yID.String()[:6], yFrame, yesVotesStake, QUORUM))
-							continue nextXEventProcessingLoop // Move to the next xEvent.
+								xID.Short(), xFrame, yID.Short(), yFrame, yesVotesStake, QUORUM))
+							// logger.Info("Transactions for decided CLOTHO event: ", xEvent.EventData.Transactions) // Log giao dịch nếu cần
+							continue nextXEventProcessingLoop
 						}
 						if noVotesStake >= QUORUM {
 							xEvent.SetCandidate(false)
 							xEvent.SetClothoStatus(ClothoIsNotClotho)
+							decidedInThisRun[xID] = true // Đánh dấu đã quyết định trong lượt này
 							logger.Info(fmt.Sprintf("DecideClotho: DECIDED - Root %s (F%d) IS NOT CLOTHO. Determined by aggregated votes at yEvent %s (F%d). NoStake: %d >= Quorum: %d",
-								xID.String()[:6], xFrame, yID.String()[:6], yFrame, noVotesStake, QUORUM))
-							continue nextXEventProcessingLoop // Move to the next xEvent.
+								xID.Short(), xFrame, yID.Short(), yFrame, noVotesStake, QUORUM))
+							continue nextXEventProcessingLoop
 						}
 					}
-				}
-			}
+				} // Kết thúc vòng lặp yID (các root trong yFrame)
+			} // Kết thúc vòng lặp yFrame
 
-			if xEvent.ClothoStatus == ClothoUndecided {
-				logger.Info(fmt.Sprintf("DecideClotho: Root %s (F%d) remains UNDECIDED after checking all y-frames up to %d", xID.String()[:6], xFrame, maxFrameConsidered))
+			// Sau khi lặp qua tất cả các yFrame có thể
+			if xEvent.ClothoStatus == ClothoUndecided { // Nếu vẫn chưa quyết định
+				logger.Info(fmt.Sprintf("DecideClotho: Root %s (F%d) remains UNDECIDED after checking all y-frames up to %d in this run.", xID.Short(), xFrame, maxFrameConsidered))
 			}
-		}
-		logger.Info(fmt.Sprintf("DecideClotho: Finished processing xEvents for xFrame %d", xFrame))
+		} // Kết thúc vòng lặp xEvent (currentXEventsToProcess)
+		logger.Info(fmt.Sprintf("DecideClotho: Finished evaluating undecided roots for xFrame %d", xFrame))
 
-		// Check if all roots in the current xFrame have been decided.
-		allRootsInXFrameDecided := true
-		if len(xRootsIDsInCurrentXFrame) > 0 {
+		// Kiểm tra xem tất cả các root trong xFrame hiện tại đã được quyết định chưa
+		// (bao gồm cả những root đã được quyết định từ các lượt DecideClotho trước đó)
+		allOriginalRootsInXFrameDecided := true
+		if len(xRootsIDsInCurrentXFrame) > 0 { // Chỉ kiểm tra nếu frame này có root ban đầu
 			for _, rootID := range xRootsIDsInCurrentXFrame {
 				rootEvent, exists := ds.events[rootID]
+				// Một root được coi là "chưa xử lý xong" nếu nó tồn tại, là root, nhưng vẫn Undecided
 				if !exists || !rootEvent.EventData.IsRoot || rootEvent.ClothoStatus == ClothoUndecided {
-					allRootsInXFrameDecided = false
-					logger.Info(fmt.Sprintf("DecideClotho: xFrame %d not fully decided. Root %s is still UNDECIDED (exists: %t, isRoot: %t).", xFrame, rootID.String()[:6], exists, (exists && rootEvent.EventData.IsRoot)))
+					allOriginalRootsInXFrameDecided = false
+					logger.Info(fmt.Sprintf("DecideClotho: xFrame %d not fully decided. Root %s still UNDECIDED (exists: %t, isRoot: %t, status: %s).",
+						xFrame, rootID.Short(), exists, (exists && rootEvent.EventData.IsRoot), rootEvent.ClothoStatus))
 					break
 				}
 			}
-		} else {
-			// If there are no roots in this frame, it's considered decided for progress.
-			allRootsInXFrameDecided = true
-			logger.Info(fmt.Sprintf("DecideClotho: xFrame %d is empty, considered decided.", xFrame))
+		} else { // Nếu không có root nào trong xFrame, coi như frame đó đã "xong" cho việc tiến lastDecidedFrame
+			allOriginalRootsInXFrameDecided = true
+			logger.Info(fmt.Sprintf("DecideClotho: xFrame %d is empty, considered processed for advancing lastDecidedFrame.", xFrame))
 		}
 
-		logger.Info(fmt.Sprintf("DecideClotho: End of xFrame %d processing. AllRootsInXFrameDecided = %t", xFrame, allRootsInXFrameDecided))
+		logger.Info(fmt.Sprintf("DecideClotho: End of xFrame %d processing. All original roots decided status: %t", xFrame, allOriginalRootsInXFrameDecided))
 
-		if allRootsInXFrameDecided {
+		if allOriginalRootsInXFrameDecided {
 			ds.lastDecidedFrame = xFrame
-			logger.Info(fmt.Sprintf("DecideClotho: Updated lastDecidedFrame to %d.", ds.lastDecidedFrame))
+			logger.Info(fmt.Sprintf("DecideClotho: Updated lastDecidedFrame to %d because all roots in this frame are now decided.", ds.lastDecidedFrame))
 		} else {
-			logger.Info(fmt.Sprintf("DecideClotho: xFrame %d not fully decided. Stopping DecideClotho for subsequent frames. Current lastDecidedFrame: %d.", xFrame, ds.lastDecidedFrame))
-			break // Stop if a frame is not fully decided, as further decisions depend on it.
+			logger.Info(fmt.Sprintf("DecideClotho: xFrame %d not fully decided. Stopping advancement of lastDecidedFrame. Current lastDecidedFrame: %d.", xFrame, ds.lastDecidedFrame))
+			break // Dừng vì không thể tiến xa hơn nếu có frame chưa quyết định
 		}
 	}
 	logger.Info(fmt.Sprintf("DecideClotho: Process finished. Final lastDecidedFrame: %d", ds.lastDecidedFrame))
