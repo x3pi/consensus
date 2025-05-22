@@ -18,7 +18,7 @@ const QUORUM_PERCENTAGE float64 = 0.67 // Represents > 2/3
 
 // K_DECISION_ROUND defines the round at which a decision for xEvent is made based on yEvents.
 // For example, if K_DECISION_ROUND = 2, yEvents in xFrame+2 will decide xEvent.
-const K_DECISION_ROUND uint64 = 2
+const K_DECISION_ROUND uint64 = 5
 
 // DagStore manages Event blocks within the DAG and implements Clotho Selection logic.
 type DagStore struct {

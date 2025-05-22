@@ -35,6 +35,8 @@ func loadConfigFromFile(path string, cfg *consensusnode.NodeConfig) error {
 }
 
 func main() {
+	logger.SetFlag(4)
+
 	// Sử dụng nodeCtx để quản lý vòng đời của node và các goroutine liên quan.
 	nodeCtx, nodeCancelFunc := context.WithCancel(context.Background())
 	defer nodeCancelFunc()
