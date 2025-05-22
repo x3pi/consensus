@@ -61,6 +61,9 @@ type NodeConfig struct {
 	// The `omitempty` tag means if this field is not in the YAML,
 	// it will not cause an error, and its zero value (0) will be used.
 	InitialStake uint64 `yaml:"initialStake,omitempty"` //
+
+	AllStakers []StakerInfo `yaml:"allStakers,omitempty"` // MỚI: Danh sách tất cả staker trong mạng
+
 }
 
 // DefaultNodeConfig provides sensible default values for NodeConfig.
@@ -94,4 +97,10 @@ func DefaultNodeConfig() NodeConfig {
 
 		InitialStake: 0, // Default initial stake. Can be overridden by config.
 	}
+}
+
+// MỚI: Cấu trúc thông tin staker
+type StakerInfo struct {
+	PubKeyHex string `yaml:"pubKeyHex"` // Public key dạng hex string của staker
+	Stake     uint64 `yaml:"stake"`     // Lượng stake của staker
 }

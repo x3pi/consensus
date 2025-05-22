@@ -46,5 +46,15 @@ supportedProtocols:
   - "/meta-node/sync-request/1.0.0"         # Protocol cho yêu cầu đồng bộ hóa (ĐÃ THÊM)
 
 initialStake: 10
+allStakers:
+  - pubKeyHex: "d3f1e819826fce29566bb38864e16fb218cf7bfd38f326ae5d5194974080d025"
+    stake: 10
+  - pubKeyHex: "5d0cb2b99c7024c7688285e5eadc67c604b78672c7502dfc7f4794d6dec218b6"
+    stake: 10
+  - pubKeyHex: "40d55b8f283ca3f1ec99a6729af7dbeefe146ae4a0cab9b28a7e395f812b9139"
+    stake: 10
+  - pubKeyHex: "55e25088c16d742471feacec5fc9640d9c23b807d683b432114da42f332b8198" # Creator thứ 4 từ log
+    stake: 10 # Giả sử node này cũng có stake là 10
+
 
 consensusTickInterval: "10s"

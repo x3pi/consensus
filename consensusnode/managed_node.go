@@ -133,6 +133,18 @@ func NewManagedNode(ctx context.Context, cfg NodeConfig) (*ManagedNode, error) {
 	if ownPubKeyHex == "" && privKey != nil {
 		log.Printf("CRITICAL WARNING: ownPubKeyHex is empty despite having a private key. Node selection might not function correctly.")
 	}
+	// THÊM LOGGING PUBLIC KEY TẠI ĐÂY
+	// ===================================================================
+	if ownPubKeyHex != "" {
+		log.Printf("===== Node Public Key (Hex) =====")
+		log.Printf("  %s", ownPubKeyHex)
+		log.Printf("=================================")
+	} else {
+		log.Printf("===== Node Public Key (Hex) =====")
+		log.Printf("  (Could not determine own Public Key Hex)")
+		log.Printf("=================================")
+	}
+	// ===================================================================
 
 	connManager, err := connmgr.NewConnManager(
 		cfg.MinConnections,
@@ -175,8 +187,25 @@ func NewManagedNode(ctx context.Context, cfg NodeConfig) (*ManagedNode, error) {
 	}
 
 	initialStakeData := make(map[string]uint64)
-	if ownPubKeyHex != "" && cfg.InitialStake > 0 {
-		initialStakeData[ownPubKeyHex] = cfg.InitialStake
+	if len(cfg.AllStakers) > 0 {
+		log.Printf("Populating DagStore.stake from cfg.AllStakers. Configured staker count: %d", len(cfg.AllStakers))
+		for _, staker := range cfg.AllStakers {
+			if staker.PubKeyHex == "" {
+				log.Printf("Warning: Staker in config has empty PubKeyHex. Skipping. Stake value was: %d", staker.Stake)
+				continue
+			}
+			// Có thể thêm kiểm tra nếu stake == 0 thì cảnh báo hoặc bỏ qua tùy logic của bạn
+			initialStakeData[staker.PubKeyHex] = staker.Stake
+			log.Printf("  Staker %s... registered in initialStakeData with stake %d", staker.PubKeyHex[:min(10, len(staker.PubKeyHex))], staker.Stake)
+		}
+	} else {
+		// Nếu không có AllStakers, hệ thống không thể hoạt động đúng trong môi trường đa node.
+		log.Printf("CRITICAL WARNING: cfg.AllStakers is empty. Consensus will likely stall as other nodes' stakes are unknown.")
+		// Bạn có thể muốn thêm stake của chính node này như một fallback tối thiểu nếu đang chạy ở chế độ một node
+		// if ownPubKeyHex != "" && cfg.InitialStake > 0 {
+		//    log.Printf("  Fallback: Adding self-stake for %s...: %d", ownPubKeyHex[:min(10, len(ownPubKeyHex))], cfg.InitialStake)
+		//    initialStakeData[ownPubKeyHex] = cfg.InitialStake
+		// }
 	}
 	dagStoreInstance := dag.NewDagStore(initialStakeData)
 
