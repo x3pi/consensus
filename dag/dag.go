@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/blockchain/consensus/logger" // Custom logger for the consensus package.
@@ -15,7 +16,7 @@ import (
 // For example, this could be 2/3 of the total network stake + 1.
 // This value should be set based on the network's total stake distribution.
 // The current value of 2 is likely a placeholder for a small test network.
-const QUORUM uint64 = 2
+const QUORUM uint64 = 21
 
 // DagStore manages Event blocks within the DAG and implements Clotho Selection logic.
 type DagStore struct {
@@ -326,6 +327,7 @@ func (ds *DagStore) DecideClotho() {
 
 	nextXEventProcessingLoop:
 		for _, xEvent := range currentXEventsToProcess {
+			logger.Info("len currentXEventsToProcess: ", len(currentXEventsToProcess))
 			logger.Info(xEvent.Transactions)
 			// Nếu xEvent đã được quyết định trong các vòng lặp yFrame trước đó của cùng lượt DecideClotho này, bỏ qua.
 			// Điều này quan trọng nếu một xEvent được quyết định bởi một yEvent ở yFrame sớm,
@@ -399,9 +401,11 @@ func (ds *DagStore) DecideClotho() {
 						// logger.Debug(fmt.Sprintf("DecideClotho: yEvent %s (F%d) votes %t for xEvent %s (F%d) in round %d (YesStake: %d, NoStake: %d)", yID.Short(), yFrame, yFinalVote, xID.Short(), xFrame, round, yesVotesStake, noVotesStake))
 
 						// Kiểm tra xem xEvent đã đạt QUORUM chưa
+						logger.Info(fmt.Sprintf("DecideClotho: yesVotesStake: %d, noVotesStake: %d, QUORUM: %d", yesVotesStake, noVotesStake, QUORUM))
 						if yesVotesStake >= QUORUM {
 							xEvent.SetCandidate(true)
 							xEvent.SetClothoStatus(ClothoIsClotho)
+							logger.Error(xEvent.Transactions)
 							decidedInThisRun[xID] = true // Đánh dấu đã quyết định trong lượt này
 							logger.Info(fmt.Sprintf("DecideClotho: DECIDED - Root %s (F%d) IS CLOTHO. Determined by aggregated votes at yEvent %s (F%d). YesStake: %d >= Quorum: %d",
 								xID.Short(), xFrame, yID.Short(), yFrame, yesVotesStake, QUORUM))
@@ -734,3 +738,196 @@ func (ds *DagStore) GetEventsByCreatorSinceIndex(creatorPubKeyHex string, startI
 	})
 	return tempEvents
 }
+
+// PrintDagStoreStatus logs a detailed status of the DagStore for debugging.
+// WARNING: This can be very verbose if the DagStore contains many events.
+func (ds *DagStore) PrintDagStoreStatus() {
+	ds.mu.RLock()
+	defer ds.mu.RUnlock()
+
+	var status strings.Builder
+	// Define total internal width for content between the main borders
+	// Increased width for more space
+	const totalInternalWidth = 98
+	const topBottomBorder = "╔══════════════════════════════════════════════════════════════════════════════════════════════════╗"
+	const midBorder = "╠══════════════════════════════════════════════════════════════════════════════════════════════════╣"
+	const endBorder = "╚══════════════════════════════════════════════════════════════════════════════════════════════════╝"
+
+	status.WriteString("\n" + topBottomBorder + "\n")
+	// Helper function to create a padded line
+	line := func(content string) string {
+		// Trim potential leading/trailing newlines from content itself before calculating length
+		trimmedContent := strings.TrimRight(content, "\n\r")
+		paddingSize := totalInternalWidth - len(trimmedContent)
+		if paddingSize < 0 {
+			paddingSize = 0 // Prevent negative padding
+		}
+		return fmt.Sprintf("║%s%s║\n", trimmedContent, strings.Repeat(" ", paddingSize))
+	}
+	// Helper function for centered section titles
+	centeredTitle := func(title string) string {
+		titleText := " " + title + " "
+		totalTitleLen := len(titleText)
+		if totalTitleLen > totalInternalWidth { // Title is too long, truncate
+			titleText = titleText[:totalInternalWidth-3] + "..."
+			totalTitleLen = totalInternalWidth
+		}
+		leftPaddingCount := (totalInternalWidth - totalTitleLen) / 2
+		rightPaddingCount := totalInternalWidth - totalTitleLen - leftPaddingCount
+		if leftPaddingCount < 0 {
+			leftPaddingCount = 0
+		}
+		if rightPaddingCount < 0 {
+			rightPaddingCount = 0
+		}
+		return fmt.Sprintf("╠%s%s%s╣\n", strings.Repeat("═", leftPaddingCount), titleText, strings.Repeat("═", rightPaddingCount))
+	}
+
+	status.WriteString(line(fmt.Sprintf(" %-*s", totalInternalWidth-1, "Detailed DagStore Status"))) // Left align title within the space
+	status.WriteString(midBorder + "\n")
+
+	status.WriteString(line(fmt.Sprintf(" Total Events Stored: %d", len(ds.events))))
+	status.WriteString(line(fmt.Sprintf(" Known Creators (Latest Events Map Size): %d", len(ds.latestEvents))))
+	status.WriteString(line(fmt.Sprintf(" Last Decided Frame: %d", ds.lastDecidedFrame)))
+	status.WriteString(line(fmt.Sprintf(" Quorum for Clotho Decision: %d", QUORUM)))
+
+	status.WriteString(centeredTitle("Stake Distribution"))
+	status.WriteString(line(fmt.Sprintf(" Number of Stakers: %d", len(ds.stake))))
+	if len(ds.stake) > 0 {
+		var stakerKeys []string
+		for key := range ds.stake {
+			stakerKeys = append(stakerKeys, key)
+		}
+		sort.Strings(stakerKeys) // Sort for consistent output
+		for _, key := range stakerKeys {
+			status.WriteString(line(fmt.Sprintf("   - Creator %s...: Stake %d", key[:min(10, len(key))], ds.stake[key])))
+		}
+	} else {
+		status.WriteString(line("   No stakers defined."))
+	}
+
+	status.WriteString(centeredTitle("Latest Events by Creator"))
+	if len(ds.latestEvents) > 0 {
+		var creatorKeys []string
+		for key := range ds.latestEvents {
+			creatorKeys = append(creatorKeys, key)
+		}
+		sort.Strings(creatorKeys) // Sort for consistent output
+		for _, creatorKey := range creatorKeys {
+			eventID := ds.latestEvents[creatorKey]
+			var eventIndex uint64
+			var eventFrame uint64
+			if latestEvent, exists := ds.events[eventID]; exists {
+				eventIndex = latestEvent.EventData.Index
+				eventFrame = latestEvent.EventData.Frame
+			}
+			status.WriteString(line(fmt.Sprintf("   - Creator %s...: Latest Event %s (Idx: %d, Frame: %d)",
+				creatorKey[:min(10, len(creatorKey))],
+				eventID.Short(),
+				eventIndex,
+				eventFrame)))
+		}
+	} else {
+		status.WriteString(line("   No latest events tracked."))
+	}
+
+	status.WriteString(centeredTitle("Roots By Frame"))
+	status.WriteString(line(fmt.Sprintf(" Frames with Roots: %d", len(ds.rootsByFrame))))
+	if len(ds.rootsByFrame) > 0 {
+		var framesWithRoots []uint64
+		for frame := range ds.rootsByFrame {
+			framesWithRoots = append(framesWithRoots, frame)
+		}
+		sort.Slice(framesWithRoots, func(i, j int) bool { // Sort frames numerically
+			return framesWithRoots[i] < framesWithRoots[j]
+		})
+		for _, frame := range framesWithRoots {
+			rootIDs := ds.rootsByFrame[frame]
+			status.WriteString(line(fmt.Sprintf("   Frame %-4d (%d roots):", frame, len(rootIDs))))
+
+			for _, rootID := range rootIDs { // rootIDs are already sorted by string value during AddEvent
+				rootEvent, exists := ds.events[rootID]
+				if exists {
+					status.WriteString(line(fmt.Sprintf("     - %s - %s (Creator: %s..., Idx: %d, Status: %s, Candidate: %t)",
+						rootEvent.GetEventId().Short(),
+						rootID.Short(), // Using .Short() for better Event ID visibility
+						hex.EncodeToString(rootEvent.EventData.Creator)[:min(6, len(hex.EncodeToString(rootEvent.EventData.Creator)))],
+						rootEvent.EventData.Index,
+						rootEvent.ClothoStatus,
+						rootEvent.Candidate)))
+				} else {
+					status.WriteString(line(fmt.Sprintf("     - %s (Details not found in events map)", rootID.Short())))
+				}
+				if len(rootEvent.EventData.OtherParents) > 0 {
+					status.WriteString(line("       - Other Parents:"))
+					for _, parentID := range rootEvent.EventData.OtherParents {
+						status.WriteString(line("         - " + parentID.Short()))
+					}
+				}
+			}
+		}
+	} else {
+		status.WriteString(line("   No frames with roots."))
+	}
+
+	status.WriteString(centeredTitle("All Events"))
+	if len(ds.events) > 0 {
+		allEvents := make([]*Event, 0, len(ds.events))
+		for _, event := range ds.events {
+			allEvents = append(allEvents, event)
+		}
+		sort.Slice(allEvents, func(i, j int) bool {
+			if allEvents[i].EventData.Frame != allEvents[j].EventData.Frame {
+				return allEvents[i].EventData.Frame < allEvents[j].EventData.Frame
+			}
+			if allEvents[i].EventData.Timestamp != allEvents[j].EventData.Timestamp {
+				return allEvents[i].EventData.Timestamp < allEvents[j].EventData.Timestamp
+			}
+			return allEvents[i].GetEventId().String() < allEvents[j].GetEventId().String()
+		})
+
+		status.WriteString(line(fmt.Sprintf(" Listing %d events (sorted by Frame, Timestamp, EventID):", len(allEvents))))
+
+		for i, event := range allEvents {
+			status.WriteString(line(fmt.Sprintf(" --- Event %d/%d ---", i+1, len(allEvents))))
+
+			eventStringLines := strings.Split(strings.TrimSpace(event.String()), "\n")
+			for _, eventLineStr := range eventStringLines {
+				trimmedLine := strings.TrimSpace(eventLineStr)
+				// Max length for the indented content part.
+				// totalInternalWidth for the whole line content, -2 for "  " indent.
+				const maxLineContentLength = totalInternalWidth - 2
+
+				displayLine := "  " + trimmedLine // Indent by 2 spaces
+				if len(displayLine) > maxLineContentLength {
+					// If the indented line is too long, truncate it.
+					// We need to make sure the displayLine itself, after potential truncation,
+					// fits within the "line" helper function's expectation correctly.
+					// The "line" helper expects the content *without* the final padding.
+					// So, displayLine here should be the string that will be passed to `line()`.
+					// If `displayLine` is already `totalInternalWidth` long or more,
+					// then the `line` helper's padding calculation might become 0 or negative.
+					// It's better to truncate `displayLine` so it's less than `totalInternalWidth`.
+					if len(displayLine) > totalInternalWidth-3 { // -3 for "..."
+						displayLine = displayLine[:totalInternalWidth-3] + "..."
+					}
+				}
+				status.WriteString(line(displayLine))
+			}
+		}
+	} else {
+		status.WriteString(line(" No events in DagStore."))
+	}
+
+	status.WriteString(endBorder + "\n")
+
+	logger.Info(status.String())
+}
+
+// min function - ensure this is defined in your package or imported
+// func min(a, b int) int {
+// 	if a < b {
+// 		return a
+// 	}
+// 	return b
+// }

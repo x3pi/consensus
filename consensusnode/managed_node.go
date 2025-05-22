@@ -85,9 +85,9 @@ type ManagedNode struct {
 const (
 	// FRAMES_TO_KEEP_AFTER_FINALIZED defines how many recent finalized frames to keep.
 	// Frames older than (lastProcessedFinalizedFrame - FRAMES_TO_KEEP_AFTER_FINALIZED) will be pruned.
-	FRAMES_TO_KEEP_AFTER_FINALIZED uint64 = 50
+	FRAMES_TO_KEEP_AFTER_FINALIZED uint64 = 5
 	// MIN_FRAMES_BEFORE_PRUNING is the minimum number of frames that must be processed before pruning begins.
-	MIN_FRAMES_BEFORE_PRUNING uint64 = FRAMES_TO_KEEP_AFTER_FINALIZED + 50
+	MIN_FRAMES_BEFORE_PRUNING uint64 = FRAMES_TO_KEEP_AFTER_FINALIZED + 5
 )
 
 // NewManagedNode creates and initializes a new ManagedNode.
@@ -523,7 +523,7 @@ func (mn *ManagedNode) consensusLoop() {
 		case <-ticker.C:
 			log.Println("--- New Consensus Round ---")
 			// logger.Info("Current DagStore snapshot:", mn.dagStore.GetAllEventsSnapshot()) // Potentially very verbose
-
+			mn.dagStore.PrintDagStoreStatus()
 			// Step 1: Attempt to finalize existing events and process the "next block".
 			log.Printf("CONSENSUS_LOOP: Running DecideClotho() to determine Clotho events. DagStore's LastDecidedFrame: %d", mn.dagStore.GetLastDecidedFrame())
 			mn.dagStore.DecideClotho() // Updates Clotho status for Roots.
@@ -704,6 +704,8 @@ func (mn *ManagedNode) consensusLoop() {
 				}
 			}
 		endOfConsensusRound: // Label for goto.
+			mn.dagStore.PrintDagStoreStatus()
+
 			log.Println("--- End of Consensus Round ---")
 		}
 	}
