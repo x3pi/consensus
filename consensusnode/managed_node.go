@@ -407,12 +407,90 @@ func (mn *ManagedNode) selectOtherParents(selfCreatorHex string) []dag.EventID {
 	defer mn.recentEventsMutex.RUnlock()
 
 	var candidates []*dag.Event
+	candidateScores := make(map[dag.EventID]int) // Higher score is better
+
 	for _, event := range mn.recentEventsBuffer {
-		// Don't select an event from the same creator as self-parent
-		if hex.EncodeToString(event.EventData.Creator) != selfCreatorHex {
-			// Further filtering: prefer roots or events with high connectivity, or just recent ones.
-			// For now, take any valid candidate.
-			candidates = append(candidates, event)
+		eventCreatorHex := hex.EncodeToString(event.EventData.Creator)
+		if eventCreatorHex == selfCreatorHex {
+			continue // Don't select an event from the same creator as self-parent
+		}
+
+		// Score based on recency (higher frame, then higher timestamp)
+		// This is implicitly handled by sorting later, but can be a factor
+		score := 0 // Base score
+
+		// Prioritize IS-CLOTHO events
+		// Note: Accessing mn.dagStore requires careful consideration of locks if this function
+		// itself is called under a lock that might conflict with dagStore locks.
+		// Assuming mn.dagStore.GetEvent is thread-safe or appropriately locked internally.
+		if storedEvent, exists := mn.dagStore.GetEvent(event.GetEventId()); exists {
+			if storedEvent.ClothoStatus == dag.ClothoIsClotho {
+				score += 100 // High score for IS-CLOTHO
+			}
+		}
+		candidateScores[event.GetEventId()] = score
+		candidates = append(candidates, event)
+	}
+
+	// Attempt to use SelectReferenceNode to pick one strong candidate
+	var refNodeEventID dag.EventID
+	if len(mn.peers) > 0 && mn.dagStore != nil {
+		heights := make(map[NodeID]uint64)
+		inDegrees := make(map[NodeID]uint64)
+		var candidateNodeIDs []NodeID // NodeIDs for SelectReferenceNode (peer public keys)
+
+		// Populate heights, inDegrees, and candidateNodeIDs from known/connected peers
+		// This requires mn.connectedPeerPubKeys and access to mn.dagStore
+		mn.peerPubKeyMutex.RLock()
+		for _, pubKeyHex := range mn.connectedPeerPubKeys {
+			if pubKeyHex == selfCreatorHex || pubKeyHex == "" {
+				continue
+			}
+			nodeID := GetNodeIDFromString(pubKeyHex)
+			candidateNodeIDs = append(candidateNodeIDs, nodeID)
+
+			if h, ok := mn.dagStore.GetHeightForNode(pubKeyHex); ok {
+				heights[nodeID] = h
+			} else {
+				heights[nodeID] = 0 // Default if no height found
+			}
+			if id, ok := mn.dagStore.GetInDegreeForNode(pubKeyHex); ok {
+				inDegrees[nodeID] = id
+			} else {
+				inDegrees[nodeID] = 0 // Default
+			}
+		}
+		mn.peerPubKeyMutex.RUnlock()
+
+		if len(candidateNodeIDs) > 0 {
+			selectedRefNodePubKeyHex, err := SelectReferenceNode(heights, inDegrees, candidateNodeIDs)
+			if err == nil && selectedRefNodePubKeyHex != "" {
+				// Get the latest event from this selected reference node
+				latestEventID, exists := mn.dagStore.GetLatestEventIDByCreatorPubKeyHex(string(selectedRefNodePubKeyHex))
+				if exists && !latestEventID.IsZero() {
+					if _, isSelfParentCand := candidateScores[latestEventID]; !isSelfParentCand && hex.EncodeToString(mn.dagStore.GetEventCreator(latestEventID)) != selfCreatorHex {
+						refNodeEventID = latestEventID
+						// Give it a very high score to ensure it's considered
+						// Check if it's already in candidates, if not add it
+						foundInCandidates := false
+						for _, cand := range candidates {
+							if cand.GetEventId() == refNodeEventID {
+								foundInCandidates = true
+								break
+							}
+						}
+						if !foundInCandidates {
+							if refEvent, ok := mn.dagStore.GetEvent(refNodeEventID); ok {
+								candidates = append(candidates, refEvent)
+							}
+						}
+						candidateScores[refNodeEventID] = 200 // Even higher score
+						log.Printf("selectOtherParents: Selected reference event %s from node %s", refNodeEventID.Short(), selectedRefNodePubKeyHex)
+					}
+				}
+			} else if err != nil {
+				// log.Printf("selectOtherParents: Error selecting reference node: %v", err)
+			}
 		}
 	}
 
@@ -420,21 +498,49 @@ func (mn *ManagedNode) selectOtherParents(selfCreatorHex string) []dag.EventID {
 		return nil
 	}
 
-	// Sort candidates (e.g., by timestamp descending to pick most recent, or by frame)
+	// Sort candidates: by score descending, then by frame descending, then by timestamp descending
 	sort.Slice(candidates, func(i, j int) bool {
-		if candidates[i].EventData.Frame != candidates[j].EventData.Frame {
-			return candidates[i].EventData.Frame > candidates[j].EventData.Frame // Prefer higher frames
+		scoreI := candidateScores[candidates[i].GetEventId()]
+		scoreJ := candidateScores[candidates[j].GetEventId()]
+		if scoreI != scoreJ {
+			return scoreI > scoreJ
 		}
-		return candidates[i].EventData.Timestamp > candidates[j].EventData.Timestamp // Then most recent
+		if candidates[i].EventData.Frame != candidates[j].EventData.Frame {
+			return candidates[i].EventData.Frame > candidates[j].EventData.Frame
+		}
+		return candidates[i].EventData.Timestamp > candidates[j].EventData.Timestamp
 	})
 
 	var selectedParents []dag.EventID
-	selectedCreators := make(map[string]struct{}) // To ensure diversity of creators for other parents
+	selectedCreators := make(map[string]struct{})
+
+	// If a reference node event was chosen and is valid, add it first
+	if !refNodeEventID.IsZero() {
+		if refEvent, exists := mn.dagStore.GetEvent(refNodeEventID); exists {
+			refCreatorHex := hex.EncodeToString(refEvent.EventData.Creator)
+			if refCreatorHex != selfCreatorHex { // Should be true from above check
+				selectedParents = append(selectedParents, refNodeEventID)
+				selectedCreators[refCreatorHex] = struct{}{}
+			}
+		}
+	}
 
 	for _, cand := range candidates {
 		if len(selectedParents) >= MAX_OTHER_PARENTS {
 			break
 		}
+		// Avoid re-adding the reference event if it was already added
+		isAlreadySelected := false
+		for _, sp := range selectedParents {
+			if sp == cand.GetEventId() {
+				isAlreadySelected = true
+				break
+			}
+		}
+		if isAlreadySelected {
+			continue
+		}
+
 		candCreatorHex := hex.EncodeToString(cand.EventData.Creator)
 		if _, exists := selectedCreators[candCreatorHex]; !exists {
 			selectedParents = append(selectedParents, cand.GetEventId())
@@ -443,7 +549,7 @@ func (mn *ManagedNode) selectOtherParents(selfCreatorHex string) []dag.EventID {
 	}
 	// log.Printf("Selected %d other parents: %v", len(selectedParents), selectedParents)
 	return selectedParents
-}
+} // --- KẾT THÚC ĐOẠN CODE CẬP NHẬT ---
 
 // calculateNextFrame determines the frame for a new event.
 // Lachesis: frame(e) = max(frame(p) for p in parents_strongly_seen_by_e) + 1
@@ -470,7 +576,7 @@ func (mn *ManagedNode) calculateNextFrame(selfParentEvent *dag.Event, otherParen
 	if maxParentFrame == 0 { // This is the very first event by this creator in the DAG (no self-parent)
 		return 1 // Start with frame 1
 	}
-	return maxParentFrame + 1
+	return maxParentFrame + 1 // Sửa lỗi logic: Frame mới phải lớn hơn frame của parent
 }
 
 // checkIfRoot determines if a new event is a Root.
@@ -492,7 +598,7 @@ func (mn *ManagedNode) checkIfRoot(newEventFrame uint64, selfParentEvent *dag.Ev
 	if selfParentEvent != nil && newEventFrame <= selfParentEvent.EventData.Frame {
 		allParentsOlderFrame = false
 	}
-	if allParentsOlderFrame {
+	if allParentsOlderFrame { // Only check other parents if self-parent already satisfies
 		for _, op := range otherParentEvents {
 			if op != nil && newEventFrame <= op.EventData.Frame {
 				allParentsOlderFrame = false
@@ -500,7 +606,8 @@ func (mn *ManagedNode) checkIfRoot(newEventFrame uint64, selfParentEvent *dag.Ev
 			}
 		}
 	}
-	if allParentsOlderFrame {
+
+	if allParentsOlderFrame && newEventFrame > 0 { // Ensure frame is positive
 		return true
 	}
 
@@ -555,7 +662,7 @@ func (mn *ManagedNode) consensusLoop() {
 			}
 
 			madeProgressThisRound := len(newlyFinalizedRoots) > 0
-			logger.Error("madeProgressThisRound", madeProgressThisRound)
+			// logger.Error("madeProgressThisRound", madeProgressThisRound) // Gỡ lỗi
 			if madeProgressThisRound {
 				// log.Printf("CONSENSUS_LOOP: Found %d new Root(s) decided as Clotho to process.", len(newlyFinalizedRoots))
 				sort.Slice(newlyFinalizedRoots, func(i, j int) bool {
@@ -583,14 +690,17 @@ func (mn *ManagedNode) consensusLoop() {
 				}
 				mn.lastProcessedFinalizedFrame = maxProcessedFrameThisRound
 				// log.Printf("CONSENSUS_LOOP: Updated lastProcessedFinalizedFrame to %d", mn.lastProcessedFinalizedFrame)
-				logger.Error("lastProcessedFinalizedFrame", mn.lastProcessedFinalizedFrame)
+				// logger.Error("lastProcessedFinalizedFrame", mn.lastProcessedFinalizedFrame) // Gỡ lỗi
 				if mn.lastProcessedFinalizedFrame >= MIN_FRAMES_BEFORE_PRUNING {
 					oldestFrameToKeep := uint64(1)
-					if mn.lastProcessedFinalizedFrame > FRAMES_TO_KEEP_AFTER_FINALIZED {
+					if mn.lastProcessedFinalizedFrame > FRAMES_TO_KEEP_AFTER_FINALIZED { // Đảm bảo không trừ về 0 hoặc âm
 						oldestFrameToKeep = mn.lastProcessedFinalizedFrame - FRAMES_TO_KEEP_AFTER_FINALIZED + 1
+					} else if mn.lastProcessedFinalizedFrame >= FRAMES_TO_KEEP_AFTER_FINALIZED { // Nếu vừa bằng
+						oldestFrameToKeep = 1
 					}
+
 					// log.Printf("CONSENSUS_LOOP: Calling PruneOldEvents with oldestFrameToKeep = %d", oldestFrameToKeep)
-					logger.Error("PruneOldEvents")
+					// logger.Error("PruneOldEvents") // Gỡ lỗi
 					mn.dagStore.PruneOldEvents(oldestFrameToKeep)
 				}
 			} else { // No new finalized roots, proceed to create a new event.
@@ -645,7 +755,7 @@ func (mn *ManagedNode) consensusLoop() {
 				}
 
 				// Select OtherParents
-				selectedOtherParentIDs := mn.selectOtherParents(ownPubKeyHex)
+				selectedOtherParentIDs := mn.selectOtherParents(ownPubKeyHex) // Sử dụng hàm đã cập nhật
 				var otherParentEventsForMeta []*dag.Event
 				for _, opID := range selectedOtherParentIDs {
 					if opEvent, ok := mn.dagStore.GetEvent(opID); ok {

@@ -1047,3 +1047,15 @@ func (ds *DagStore) PrintDagStoreStatus() {
 // 	}
 // 	return b
 // }
+
+// Helper function (you might need to add this to DagStore or retrieve creator differently)
+// This is a placeholder, assuming DagStore has a way to get an event's creator if only ID is known.
+// If not, you'll need to fetch the event first.
+func (ds *DagStore) GetEventCreator(eventID EventID) []byte {
+	// ds.mu.RLock() // Or appropriate lock
+	// defer ds.mu.RUnlock()
+	if event, exists := ds.GetEvent(eventID); exists { // Assumes GetEvent is thread-safe
+		return event.EventData.Creator
+	}
+	return nil
+}

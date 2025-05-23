@@ -57,4 +57,4 @@ allStakers:
     stake: 10 # Giả sử node này cũng có stake là 10
 
 
-consensusTickInterval: "10s"
+consensusTickInterval: "1s"
