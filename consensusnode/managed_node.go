@@ -79,7 +79,9 @@ type ManagedNode struct {
 const (
 	FRAMES_TO_KEEP_AFTER_FINALIZED uint64 = 5
 	MIN_FRAMES_BEFORE_PRUNING      uint64 = FRAMES_TO_KEEP_AFTER_FINALIZED + 5
-	MAX_OTHER_PARENTS              int    = 2 // Max number of other parents to select for a new event
+	MAX_OTHER_PARENTS              int    = 2  // Max number of other parents to select for a new event
+	MAX_UNDECIDED_FRAME_DIFFERENCE uint64 = 10 // Ngưỡng chênh lệch frame chưa quyết định
+
 )
 
 // NewManagedNode creates and initializes a new ManagedNode.
@@ -639,22 +641,22 @@ func (mn *ManagedNode) consensusLoop() {
 		case <-ticker.C:
 			// log.Println("--- New Consensus Round ---")
 			// mn.dagStore.PrintDagStoreStatus() // Can be very verbose
-			mn.dagStore.PrintDagStoreStatus()
+			mn.dagStore.PrintDagStoreStatus() //
 			// Step 1: Attempt to finalize existing events.
 			// log.Printf("CONSENSUS_LOOP: Running DecideClotho(). DagStore's LastDecidedFrame: %d", mn.dagStore.GetLastDecidedFrame())
-			mn.dagStore.DecideClotho()
+			mn.dagStore.DecideClotho() //
 			// logger.Info("CONSENSUS_LOOP: DecideClotho() finished.")
 
-			currentDagLastDecidedFrame := mn.dagStore.GetLastDecidedFrame()
+			currentDagLastDecidedFrame := mn.dagStore.GetLastDecidedFrame() //
 			// log.Printf("CONSENSUS_LOOP: After DecideClotho(), DagStore's LastDecidedFrame: %d. Previously processed finalized frame: %d", currentDagLastDecidedFrame, mn.lastProcessedFinalizedFrame)
 
 			var newlyFinalizedRoots []*dag.Event
 			if currentDagLastDecidedFrame > mn.lastProcessedFinalizedFrame {
 				for frameToProcess := mn.lastProcessedFinalizedFrame + 1; frameToProcess <= currentDagLastDecidedFrame; frameToProcess++ {
-					rootsInFrame := mn.dagStore.GetRoots(frameToProcess)
+					rootsInFrame := mn.dagStore.GetRoots(frameToProcess) //
 					for _, rootID := range rootsInFrame {
-						rootEvent, exists := mn.dagStore.GetEvent(rootID)
-						if exists && rootEvent.EventData.IsRoot && rootEvent.ClothoStatus == dag.ClothoIsClotho {
+						rootEvent, exists := mn.dagStore.GetEvent(rootID)                                         //
+						if exists && rootEvent.EventData.IsRoot && rootEvent.ClothoStatus == dag.ClothoIsClotho { //
 							newlyFinalizedRoots = append(newlyFinalizedRoots, rootEvent)
 						}
 					}
@@ -665,52 +667,64 @@ func (mn *ManagedNode) consensusLoop() {
 			// logger.Error("madeProgressThisRound", madeProgressThisRound) // Gỡ lỗi
 			if madeProgressThisRound {
 				// log.Printf("CONSENSUS_LOOP: Found %d new Root(s) decided as Clotho to process.", len(newlyFinalizedRoots))
-				sort.Slice(newlyFinalizedRoots, func(i, j int) bool {
-					if newlyFinalizedRoots[i].EventData.Frame != newlyFinalizedRoots[j].EventData.Frame {
-						return newlyFinalizedRoots[i].EventData.Frame < newlyFinalizedRoots[j].EventData.Frame
+				sort.Slice(newlyFinalizedRoots, func(i, j int) bool { //
+					if newlyFinalizedRoots[i].EventData.Frame != newlyFinalizedRoots[j].EventData.Frame { //
+						return newlyFinalizedRoots[i].EventData.Frame < newlyFinalizedRoots[j].EventData.Frame //
 					}
-					if newlyFinalizedRoots[i].EventData.Timestamp != newlyFinalizedRoots[j].EventData.Timestamp {
-						return newlyFinalizedRoots[i].EventData.Timestamp < newlyFinalizedRoots[j].EventData.Timestamp
+					if newlyFinalizedRoots[i].EventData.Timestamp != newlyFinalizedRoots[j].EventData.Timestamp { //
+						return newlyFinalizedRoots[i].EventData.Timestamp < newlyFinalizedRoots[j].EventData.Timestamp //
 					}
-					return newlyFinalizedRoots[i].GetEventId().String() < newlyFinalizedRoots[j].GetEventId().String()
+					return newlyFinalizedRoots[i].GetEventId().String() < newlyFinalizedRoots[j].GetEventId().String() //
 				})
 
 				// log.Println("CONSENSUS_LOOP: Finalized (Clotho) Roots in processing order:")
 				maxProcessedFrameThisRound := mn.lastProcessedFinalizedFrame
 				for _, finalizedRoot := range newlyFinalizedRoots {
 					logger.Info(fmt.Sprintf("  Processing Finalized Root: ID %s, Frame %d, Creator %s..., TxLen: %d bytes",
-						finalizedRoot.GetEventId().Short(),
-						finalizedRoot.EventData.Frame,
-						hex.EncodeToString(finalizedRoot.EventData.Creator)[:6],
-						len(finalizedRoot.EventData.Transactions)))
+						finalizedRoot.GetEventId().Short(),                      //
+						finalizedRoot.EventData.Frame,                           //
+						hex.EncodeToString(finalizedRoot.EventData.Creator)[:6], //
+						len(finalizedRoot.EventData.Transactions)))              //
 					// Application-specific processing of finalizedRoot.EventData.Transactions here.
-					if finalizedRoot.EventData.Frame > maxProcessedFrameThisRound {
-						maxProcessedFrameThisRound = finalizedRoot.EventData.Frame
+					if finalizedRoot.EventData.Frame > maxProcessedFrameThisRound { //
+						maxProcessedFrameThisRound = finalizedRoot.EventData.Frame //
 					}
 				}
 				mn.lastProcessedFinalizedFrame = maxProcessedFrameThisRound
 				// log.Printf("CONSENSUS_LOOP: Updated lastProcessedFinalizedFrame to %d", mn.lastProcessedFinalizedFrame)
 				// logger.Error("lastProcessedFinalizedFrame", mn.lastProcessedFinalizedFrame) // Gỡ lỗi
-				if mn.lastProcessedFinalizedFrame >= MIN_FRAMES_BEFORE_PRUNING {
+				if mn.lastProcessedFinalizedFrame >= MIN_FRAMES_BEFORE_PRUNING { //
 					oldestFrameToKeep := uint64(1)
-					if mn.lastProcessedFinalizedFrame > FRAMES_TO_KEEP_AFTER_FINALIZED { // Đảm bảo không trừ về 0 hoặc âm
-						oldestFrameToKeep = mn.lastProcessedFinalizedFrame - FRAMES_TO_KEEP_AFTER_FINALIZED + 1
-					} else if mn.lastProcessedFinalizedFrame >= FRAMES_TO_KEEP_AFTER_FINALIZED { // Nếu vừa bằng
+					if mn.lastProcessedFinalizedFrame > FRAMES_TO_KEEP_AFTER_FINALIZED { // // Đảm bảo không trừ về 0 hoặc âm
+						oldestFrameToKeep = mn.lastProcessedFinalizedFrame - FRAMES_TO_KEEP_AFTER_FINALIZED + 1 //
+					} else if mn.lastProcessedFinalizedFrame >= FRAMES_TO_KEEP_AFTER_FINALIZED { // // Nếu vừa bằng
 						oldestFrameToKeep = 1
 					}
 
 					// log.Printf("CONSENSUS_LOOP: Calling PruneOldEvents with oldestFrameToKeep = %d", oldestFrameToKeep)
 					// logger.Error("PruneOldEvents") // Gỡ lỗi
-					mn.dagStore.PruneOldEvents(oldestFrameToKeep)
+					mn.dagStore.PruneOldEvents(oldestFrameToKeep) //
 				}
 			} else { // No new finalized roots, proceed to create a new event.
 				// log.Printf("CONSENSUS_LOOP: No new Roots were finalized (Clotho). Proceeding to create new event and synchronize.")
 
-				reqCtx, cancelReq := context.WithTimeout(mn.ctx, 5*time.Second) // Shorter timeout for TX request
-				requestPayload := []byte(fmt.Sprintf(`{"action": "get_pending_transactions", "timestamp": %d}`, time.Now().Unix()))
+				// *** BEGIN MODIFICATION ***
+				// Check if there are too many undecided frames before creating a new event
+				lastDecidedFrame := mn.dagStore.GetLastDecidedFrame()   //
+				maxFrameWithRoots := mn.dagStore.GetMaxFrameWithRoots() // This is the new method
+
+				if maxFrameWithRoots > lastDecidedFrame && (maxFrameWithRoots-lastDecidedFrame) > MAX_UNDECIDED_FRAME_DIFFERENCE { //
+					logger.Warn(fmt.Sprintf("CONSENSUS_LOOP: Pausing event creation. Too many undecided frames. LastDecided: %d, MaxWithRoots: %d, Diff: %d, Threshold: %d",
+						lastDecidedFrame, maxFrameWithRoots, (maxFrameWithRoots - lastDecidedFrame), MAX_UNDECIDED_FRAME_DIFFERENCE)) //
+					goto endOfConsensusRound // Skip event creation for this tick
+				}
+				// *** END MODIFICATION ***
+
+				reqCtx, cancelReq := context.WithTimeout(mn.ctx, 5*time.Second)                                                     // Shorter timeout for TX request //
+				requestPayload := []byte(fmt.Sprintf(`{"action": "get_pending_transactions", "timestamp": %d}`, time.Now().Unix())) //
 				// log.Printf("CONSENSUS_LOOP: Sending TransactionsRequestProtocol to Master Node...")
-				responseData, err := mn.SendRequestToMasterNode(reqCtx, TransactionsRequestProtocol, requestPayload)
-				cancelReq()
+				responseData, err := mn.SendRequestToMasterNode(reqCtx, TransactionsRequestProtocol, requestPayload) //
+				cancelReq()                                                                                          //
 
 				var transactionsForNewBlock []byte
 				if err != nil {
@@ -719,86 +733,86 @@ func (mn *ManagedNode) consensusLoop() {
 				} else {
 					// log.Printf("CONSENSUS_LOOP: Received transaction response from Master Node (%d bytes).", len(responseData))
 					var parseErr error
-					transactionsForNewBlock, parseErr = parseTransactionsFromResponse(responseData) // Assume this exists and works
+					transactionsForNewBlock, parseErr = parseTransactionsFromResponse(responseData) // Assume this exists and works //
 					if parseErr != nil {
 						log.Printf("CONSENSUS_LOOP: Error parsing transactions from Master Node: %v. Creating event without these transactions.", parseErr)
 						transactionsForNewBlock = []byte{}
 					}
 				}
 
-				ownPubKeyHex, err := mn.getOwnPublicKeyHex()
+				ownPubKeyHex, err := mn.getOwnPublicKeyHex() //
 				if err != nil {
 					log.Printf("CONSENSUS_LOOP: CRITICAL error getting own public key: %v. Skipping event creation.", err)
 					goto endOfConsensusRound
 				}
-				ownPubKeyBytes, err := hex.DecodeString(ownPubKeyHex) // Re-decode, ensure consistency
+				ownPubKeyBytes, err := hex.DecodeString(ownPubKeyHex) // Re-decode, ensure consistency //
 				if err != nil {
 					log.Printf("CONSENSUS_LOOP: CRITICAL error converting own public key hex to bytes: %v. Skipping event creation.", err)
 					goto endOfConsensusRound
 				}
 
-				latestSelfEventID, selfEventExists := mn.dagStore.GetLatestEventIDByCreatorPubKeyHex(ownPubKeyHex)
+				latestSelfEventID, selfEventExists := mn.dagStore.GetLatestEventIDByCreatorPubKeyHex(ownPubKeyHex) //
 				var selfParentEvent *dag.Event
 				var newEventIndex uint64 = 1
 
 				if selfEventExists {
 					var ok bool
-					selfParentEvent, ok = mn.dagStore.GetEvent(latestSelfEventID)
+					selfParentEvent, ok = mn.dagStore.GetEvent(latestSelfEventID) //
 					if !ok {
-						log.Printf("CONSENSUS_LOOP: Error: Latest self event ID %s exists but event not found in store. Skipping event creation.", latestSelfEventID.Short())
+						log.Printf("CONSENSUS_LOOP: Error: Latest self event ID %s exists but event not found in store. Skipping event creation.", latestSelfEventID.Short()) //
 						goto endOfConsensusRound
 					}
-					newEventIndex = selfParentEvent.EventData.Index + 1
+					newEventIndex = selfParentEvent.EventData.Index + 1 //
 				} else {
 					// log.Printf("CONSENSUS_LOOP: No previous event found for node %s. This will be its first event (Index %d).", ownPubKeyHex[:6], newEventIndex)
-					latestSelfEventID = dag.EventID{}
+					latestSelfEventID = dag.EventID{} //
 				}
 
 				// Select OtherParents
-				selectedOtherParentIDs := mn.selectOtherParents(ownPubKeyHex) // Sử dụng hàm đã cập nhật
+				selectedOtherParentIDs := mn.selectOtherParents(ownPubKeyHex) // Sử dụng hàm đã cập nhật //
 				var otherParentEventsForMeta []*dag.Event
 				for _, opID := range selectedOtherParentIDs {
-					if opEvent, ok := mn.dagStore.GetEvent(opID); ok {
+					if opEvent, ok := mn.dagStore.GetEvent(opID); ok { //
 						otherParentEventsForMeta = append(otherParentEventsForMeta, opEvent)
 					}
 				}
 
-				newEventFrame := mn.calculateNextFrame(selfParentEvent, otherParentEventsForMeta)
-				newEventIsRoot := mn.checkIfRoot(newEventFrame, selfParentEvent, otherParentEventsForMeta)
+				newEventFrame := mn.calculateNextFrame(selfParentEvent, otherParentEventsForMeta)          //
+				newEventIsRoot := mn.checkIfRoot(newEventFrame, selfParentEvent, otherParentEventsForMeta) //
 
-				newEventData := dag.EventData{
-					Transactions: transactionsForNewBlock,
-					SelfParent:   latestSelfEventID,
-					OtherParents: selectedOtherParentIDs, // Use selected diverse parents
-					Creator:      ownPubKeyBytes,
-					Index:        newEventIndex,
-					Timestamp:    time.Now().UnixNano(), // Higher precision timestamp
-					Frame:        newEventFrame,
-					IsRoot:       newEventIsRoot,
+				newEventData := dag.EventData{ //
+					Transactions: transactionsForNewBlock, //
+					SelfParent:   latestSelfEventID,       //
+					OtherParents: selectedOtherParentIDs,  // Use selected diverse parents //
+					Creator:      ownPubKeyBytes,          //
+					Index:        newEventIndex,           //
+					Timestamp:    time.Now().UnixNano(),   // Higher precision timestamp //
+					Frame:        newEventFrame,           //
+					IsRoot:       newEventIsRoot,          //
 				}
 
-				signature, signErr := signEventData(newEventData, mn.privKey) // Assume this exists
+				signature, signErr := signEventData(newEventData, mn.privKey) // Assume this exists //
 				if signErr != nil {
 					log.Printf("CONSENSUS_LOOP: Error signing event data: %v. Skipping event creation.", signErr)
 					goto endOfConsensusRound
 				}
-				newEvent := dag.NewEvent(newEventData, signature)
-				newEventID := newEvent.GetEventId() // Get ID after NewEvent calculates it
+				newEvent := dag.NewEvent(newEventData, signature) //
+				newEventID := newEvent.GetEventId()               // Get ID after NewEvent calculates it //
 
-				if addEventErr := mn.dagStore.AddEvent(newEvent); addEventErr != nil {
-					log.Printf("CONSENSUS_LOOP: Error adding new local event %s to DagStore: %v", newEventID.Short(), addEventErr)
+				if addEventErr := mn.dagStore.AddEvent(newEvent); addEventErr != nil { //
+					log.Printf("CONSENSUS_LOOP: Error adding new local event %s to DagStore: %v", newEventID.Short(), addEventErr) //
 					goto endOfConsensusRound
 				}
 				// log.Printf("CONSENSUS_LOOP: Created and added new local event: ID %s, Idx %d, F %d, Root %t, TxLen: %d, OPs: %d",
 				// 	newEventID.Short(), newEvent.EventData.Index, newEvent.EventData.Frame, newEvent.EventData.IsRoot, len(newEvent.EventData.Transactions), len(selectedOtherParentIDs))
 
 				// Add to recent buffer and gossip
-				mn.addEventToRecentBuffer(newEvent)
-				mn.gossipEvent(newEvent) // New function to broadcast the event
+				mn.addEventToRecentBuffer(newEvent) //
+				mn.gossipEvent(newEvent)            // New function to broadcast the event //
 
 				// Step 3: Synchronize with a few peers (not just one partner)
 				// This is a simplified sync, could be more targeted.
-				mn.triggerPeerSynchronization()
+				mn.triggerPeerSynchronization() //
 			}
 		endOfConsensusRound:
 			// mn.dagStore.PrintDagStoreStatus() // For debugging, can be verbose

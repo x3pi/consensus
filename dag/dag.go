@@ -1059,3 +1059,21 @@ func (ds *DagStore) GetEventCreator(eventID EventID) []byte {
 	}
 	return nil
 }
+
+// GetMaxFrameWithRoots returns the highest frame number that currently has roots.
+// Returns 0 if there are no roots or no frames.
+func (ds *DagStore) GetMaxFrameWithRoots() uint64 {
+	ds.mu.RLock()
+	defer ds.mu.RUnlock()
+
+	var maxFrame uint64 = 0
+	if len(ds.rootsByFrame) == 0 {
+		return 0
+	}
+	for frame := range ds.rootsByFrame {
+		if frame > maxFrame {
+			maxFrame = frame
+		}
+	}
+	return maxFrame
+}
